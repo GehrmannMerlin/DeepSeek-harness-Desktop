@@ -1,0 +1,22 @@
+appId: com.deepseek.harness.desktop
+productName: DeepSeek Harness Desktop
+directories:
+  output: dist
+  buildResources: build
+files:
+  - src/**
+  - renderer/**
+  - assets/**
+  - package.json
+asar: true
+win:
+  target:
+    - nsis
+  icon: assets/icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DeepSeek Harness
+  artifactName: ${productName} Setup ${version}.${ext}

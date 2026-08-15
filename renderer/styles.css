@@ -1,0 +1,63 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body.splash {
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #0f1115;
+  color: #e6e8eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  margin: 0;
+}
+
+.splash-box { text-align: center; padding: 32px; }
+
+.logo {
+  width: 88px;
+  height: 88px;
+  margin-bottom: 20px;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 24px;
+  letter-spacing: 0.3px;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto 18px;
+  border: 3px solid rgba(77, 107, 254, 0.25);
+  border-top-color: #4d6bfe;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.status { font-size: 13px; color: #9aa3af; }
+
+.error-msg {
+  font-size: 14px;
+  color: #ffb4a9;
+  white-space: pre-wrap;
+  margin-bottom: 16px;
+  max-width: 540px;
+  line-height: 1.6;
+}
+
+.hint { font-size: 13px; color: #9aa3af; margin-bottom: 20px; }
+
+.log-path {
+  font-size: 12px;
+  color: #6b7280;
+  word-break: break-all;
+  max-width: 560px;
+  line-height: 1.5;
+}

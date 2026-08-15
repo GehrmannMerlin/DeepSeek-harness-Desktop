@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepSeek Harness</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="splash">
+  <div class="splash-box error-box">
+    <img class="logo" src="../assets/icon.png" alt="DeepSeek Harness" />
+    <h1>DeepSeek Harness</h1>
+    <p id="message" class="error-msg"></p>
+    <p class="hint">请通过系统托盘菜单 → “重新启动 Agent” 重试。</p>
+    <p id="logs" class="log-path"></p>
+  </div>
+  <script>
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var msg = q.get('msg') || '发生未知错误。';
+      var logs = q.get('logs') || '';
+      document.getElementById('message').textContent = msg;
+      document.getElementById('logs').textContent = logs ? '日志目录：' + logs : '';
+    })();
+  </script>
+</body>
+</html>
