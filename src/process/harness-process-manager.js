@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const { resolveCommand } = require('../utils/npx-resolver');
 const { detectUrl } = require('../utils/url-detector');
 const { killTree, isAlive } = require('./process-tree');
+const { mark } = require('../utils/boot-timeline');
 
 const STATUS = Object.freeze({
   STOPPED: 'STOPPED',
@@ -78,6 +79,7 @@ class HarnessProcessManager extends EventEmitter {
 
     const { command, args } = resolveCommand();
     this.logger.info(`spawn: ${command} ${args.join(' ')}`);
+    mark('dsh_spawn_started', `${command} ${args.join(' ')}`);
 
     return new Promise((resolve) => {
       const child = spawn(command, args, {
@@ -90,9 +92,15 @@ class HarnessProcessManager extends EventEmitter {
       this.logger.info(`spawned pid=${child.pid}`);
 
       let settled = false;
+      let stdoutFirst = true;
+      let stderrFirst = true;
       const settle = (ok) => { if (!settled) { settled = true; resolve(ok); } };
 
-      child.once('spawn', () => { this.logger.info('child process spawned'); settle(true); });
+      child.once('spawn', () => {
+        this.logger.info('child process spawned');
+        mark('dsh_spawned', `pid=${child.pid}`);
+        settle(true);
+      });
       child.once('error', (err) => {
         this.logger.error(`spawn error: ${err.message}`);
         settle(false);
@@ -102,6 +110,7 @@ class HarnessProcessManager extends EventEmitter {
       });
 
       child.stdout.on('data', (buf) => {
+        if (stdoutFirst) { stdoutFirst = false; mark('dsh_stdout_first_byte'); }
         for (const line of buf.toString().split(/\r?\n/)) {
           if (!line.trim()) continue;
           this.logger.info(`stdout: ${line}`);
@@ -109,6 +118,7 @@ class HarnessProcessManager extends EventEmitter {
           if (url && !this.url) {
             this.url = url;
             this.logger.info(`url detected: ${url}`);
+            mark('harness_url_detected', url);
             this.emit('url-detected', url);
             if (this.status === STATUS.STARTING) this._setStatus(STATUS.WAITING_FOR_SERVER);
           }
@@ -116,6 +126,7 @@ class HarnessProcessManager extends EventEmitter {
       });
 
       child.stderr.on('data', (buf) => {
+        if (stderrFirst) { stderrFirst = false; mark('dsh_stderr_first_byte'); }
         for (const line of buf.toString().split(/\r?\n/)) {
           if (line.trim()) this.logger.info(`stderr: ${line}`);
         }

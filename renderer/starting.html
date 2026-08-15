@@ -13,5 +13,22 @@
     <div class="spinner"></div>
     <p id="status" class="status">正在启动 DeepSeek Harness...</p>
   </div>
+  <script>
+    // First-paint observability: report DOM ready + the first animation frame
+    // back to the main process via console (captured by console-message).
+    (function () {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+          console.log('[splash] domcontentloaded');
+        });
+      } else {
+        console.log('[splash] domcontentloaded');
+      }
+      window.addEventListener('load', function () { console.log('[splash] load'); });
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(function () { console.log('[splash] first-frame'); });
+      }
+    })();
+  </script>
 </body>
 </html>

@@ -1,5 +1,6 @@
 'use strict';
 const http = require('http');
+const { mark } = require('../utils/boot-timeline');
 
 // A page is "really DeepSeek Harness" when it carries the boot payload that
 // only dsh web injects. Port-open alone is not enough (the port could be held
@@ -43,9 +44,10 @@ async function check(url, { timeout = 1500 } = {}) {
 
 async function waitUntilReady(url, { interval = 800, timeout = 45000 } = {}) {
   const start = Date.now();
+  mark('healthcheck_started', url);
   for (;;) {
     const r = await check(url);
-    if (r.ready) return { ok: true, elapsed: Date.now() - start };
+    if (r.ready) { mark('healthcheck_first_success', `${Date.now() - start}ms`); return { ok: true, elapsed: Date.now() - start }; }
     if (Date.now() - start >= timeout) return { ok: false, elapsed: Date.now() - start };
     await new Promise((res) => setTimeout(res, interval));
   }

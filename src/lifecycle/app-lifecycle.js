@@ -8,6 +8,7 @@ const { getLogger } = require('../utils/logger');
 const { asset, getLogsDir } = require('../utils/paths');
 const { DEFAULT_URL } = require('../utils/url-detector');
 const { checkToolchain } = require('../utils/npx-resolver');
+const { mark, attach, dump } = require('../utils/boot-timeline');
 
 const DEFAULT_PORT = 3080;
 const STARTUP_TIMEOUT = 45000;
@@ -35,25 +36,38 @@ class AppLifecycle {
   }
 
   async start() {
+    // Durable boot timeline + mirror into application.log from here on.
+    attach(getLogsDir(), (m) => this.appLogger.info(m));
+
     this.appLogger.info('=== DeepSeek Harness Desktop start ===');
     this.appLogger.info(`node=${process.versions.node} electron=${process.versions.electron} packaged=${app.isPackaged}`);
+    this.appLogger.info(`splashOnly=${this._isSplashOnly()}`);
 
-    const missing = checkToolchain();
-    if (missing.length) {
-      this.appLogger.error(`toolchain missing: ${missing.join(', ')}`);
-      this._createWindow();
-      this._showError(`未找到必要的运行环境：${missing.join('、')}。\n\n请先安装 Node.js（含 npm / npx），并确认其位于系统 PATH 中。`);
-      return;
-    }
-
+    // Show the window (splash) first, before any environment detection, so the
+    // user gets immediate feedback. The toolchain check is async and runs after.
     this._createWindow();
     this.window.loadStarting();
     this._createTray();
+    mark('tray_created');
 
     this.processManager.on('status-change', () => { if (this.tray) this.tray.refresh(); });
     this.processManager.on('exit', ({ code }) => this.appLogger.info(`harness exited code=${code}`));
 
+    mark('toolchain_check_started');
+    const missing = await checkToolchain();
+    mark('toolchain_check_finished', `missing=[${missing.join(',')}]`);
+
+    if (missing.length) {
+      this.appLogger.error(`toolchain missing: ${missing.join(', ')}`);
+      this._showError(`未找到必要的运行环境：${missing.join('、')}。\n\n请先安装 Node.js（含 npm / npx），并确认其位于系统 PATH 中。`);
+      return;
+    }
+
     await this._boot();
+  }
+
+  _isSplashOnly() {
+    return process.argv.includes('--splash-only') || process.env.DSH_DESKTOP_SPLASH_ONLY === '1';
   }
 
   _createWindow() {
@@ -74,8 +88,19 @@ class AppLifecycle {
   }
 
   async _boot() {
+    mark('bootstrap_started');
+
+    // Diagnostic: render the local splash and stop here, to isolate the
+    // Electron/renderer path from the harness bootstrap path.
+    if (this._isSplashOnly()) {
+      this.appLogger.info('splash-only mode: skipping harness bootstrap');
+      return;
+    }
+
     this.window.setStartingStatus('正在检查本地环境...');
+    mark('existing_harness_check_started');
     const state = await probe(DEFAULT_PORT);
+    mark('existing_harness_check_finished', `state=${state}`);
 
     if (state === 'harness') {
       const url = `http://127.0.0.1:${DEFAULT_PORT}/`;
@@ -124,7 +149,9 @@ class AppLifecycle {
     await this._boot();
   }
 
-  _showWindow() { if (this.window) this.window.focus(); }
+  _showWindow() {
+    if (this.window) this.window.focus();
+  }
 
   _showError(msg) {
     if (this.window) this.window.loadError(msg, getLogsDir());
@@ -133,6 +160,7 @@ class AppLifecycle {
   async quit() {
     if (this.isQuitting) return;
     this.isQuitting = true;
+    mark('shutdown_started');
     this.appLogger.info('=== quit ===');
     if (this.processManager.ownsHarness()) {
       this.appLogger.info('stopping owned harness...');
@@ -141,6 +169,7 @@ class AppLifecycle {
     } else {
       this.appLogger.info('external harness left running');
     }
+    this.appLogger.info('--- boot timeline ---\n' + dump());
     if (this.tray) { this.tray.destroy(); this.tray = null; }
     if (this.window) { this.window.destroy(); this.window = null; }
     this.appLogger.info('quit complete');
