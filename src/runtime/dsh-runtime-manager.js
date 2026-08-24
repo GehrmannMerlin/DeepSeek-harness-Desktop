@@ -55,7 +55,8 @@ class DshRuntimeManager {
     if (state && state.current !== null && state.current !== undefined) {
       const current = state.current;
       if (current.kind !== 'managed' || !semver.valid(current.version) ||
-          typeof current.relativePath !== 'string' || path.isAbsolute(current.relativePath)) {
+          typeof current.relativePath !== 'string' || path.isAbsolute(current.relativePath) ||
+          current.relativePath !== current.version) {
         this.logger.error('Invalid managed runtime state; ignoring managed runtime');
       } else {
         const managed = await this.resolveManagedRuntime(current.version);
@@ -82,10 +83,17 @@ class DshRuntimeManager {
     let pkg;
     try {
       pkg = JSON.parse(await this.fs.readFile(packagePath, 'utf8'));
-    } catch {
+    } catch (error) {
+      if (!error || error.code !== 'ENOENT') this.logger.error('Invalid bundled runtime manifest', error);
       return null;
     }
-    return this.validateRuntime(this.bundledRoot, pkg.version, 'bundled');
+    if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg) || typeof pkg.version !== 'string') {
+      this.logger.error('Invalid bundled runtime manifest');
+      return null;
+    }
+    const descriptor = await this.validateRuntime(this.bundledRoot, pkg.version, 'bundled');
+    if (!descriptor) this.logger.error('Invalid bundled runtime');
+    return descriptor;
   }
 
   async resolveManagedRuntime(version) {

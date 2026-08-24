@@ -78,6 +78,51 @@ test('corrupt state or invalid managed tree falls back to bundled', async () => 
   });
 });
 
+test('managed state with a corrupt relativePath falls back to bundled even when its version exists', async () => {
+  await withTempDir(async (directory) => {
+    const runtimeRoot = path.join(directory, 'runtime');
+    const bundledRoot = path.join(directory, 'bundled-runtime');
+    await writeRuntime(path.join(runtimeRoot, 'versions', '1.2.3'), '1.2.3');
+    await writeRuntime(bundledRoot, '2.0.0');
+    const errors = [];
+    const state = createDefaultRuntimeState();
+    state.current = { relativePath: '..\\outside', kind: 'managed', version: '1.2.3' };
+
+    const descriptor = await createManager({
+      state,
+      runtimeRoot,
+      bundledRoot,
+      logger: { error: (...args) => errors.push(args) },
+    }).resolveCurrentRuntime();
+
+    assert.equal(descriptor.kind, 'bundled');
+    assert.equal(descriptor.version, '2.0.0');
+    assert.equal(errors.length, 1);
+    assert.match(String(errors[0][0]), /managed runtime state/i);
+  });
+});
+
+test('null bundled manifest logs and falls through to legacy', async () => {
+  await withTempDir(async (directory) => {
+    const bundledRoot = path.join(directory, 'bundled-runtime');
+    const packagePath = path.join(bundledRoot, 'node_modules', '@deepseek-ai', 'dsh', 'package.json');
+    await fs.mkdir(path.dirname(packagePath), { recursive: true });
+    await fs.writeFile(packagePath, 'null', 'utf8');
+    const errors = [];
+
+    const descriptor = await createManager({
+      state: createDefaultRuntimeState(),
+      runtimeRoot: path.join(directory, 'runtime'),
+      bundledRoot,
+      logger: { error: (...args) => errors.push(args) },
+    }).resolveCurrentRuntime();
+
+    assert.equal(descriptor.kind, 'legacy');
+    assert.equal(errors.length, 1);
+    assert.match(String(errors[0][0]), /bundled runtime/i);
+  });
+});
+
 test('no bundled runtime retains legacy npx fallback', async () => {
   await withTempDir(async (directory) => {
     const descriptor = await createManager({
