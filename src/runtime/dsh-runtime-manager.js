@@ -150,7 +150,7 @@ class DshRuntimeManager {
         rootPath,
         packagePath: packageRoot,
         cliEntry,
-        args: [cliEntry],
+        args: [cliEntry, 'web'],
         command,
         source: kind,
       });

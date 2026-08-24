@@ -71,6 +71,24 @@ test('managed current wins over bundled fallback', async () => {
 
     assert.equal(descriptor.kind, 'managed');
     assert.equal(descriptor.version, '1.2.3');
+    assert.deepEqual(descriptor.args, [descriptor.cliEntry, 'web']);
+  });
+});
+
+test('bundled fallback descriptor includes the DSH web subcommand', async () => {
+  await withTempDir(async (directory) => {
+    const runtimeRoot = path.join(directory, 'runtime');
+    const bundledRoot = path.join(directory, 'bundled-runtime');
+    await writeRuntime(bundledRoot, '2.0.0');
+
+    const descriptor = await createManager({
+      state: createDefaultRuntimeState(),
+      runtimeRoot,
+      bundledRoot,
+    }).resolveCurrentRuntime();
+
+    assert.equal(descriptor.kind, 'bundled');
+    assert.deepEqual(descriptor.args, [descriptor.cliEntry, 'web']);
   });
 });
 

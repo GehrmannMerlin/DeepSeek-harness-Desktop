@@ -2,10 +2,14 @@
 
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const path = require('node:path');
 const test = require('node:test');
 
 const { HarnessProcessManager, STATUS } = require('../src/process/harness-process-manager');
+const { DshRuntimeManager } = require('../src/runtime/dsh-runtime-manager');
+const { RuntimeStateStore, createDefaultRuntimeState } = require('../src/runtime/runtime-state-store');
 const health = require('../src/health/harness-health-checker');
+const { createPackageTree, withTempDir } = require('./test-helpers');
 
 function createLogger() {
   return {
@@ -72,6 +76,57 @@ test('descriptor-aware start spawns the exact command and args without a shell',
   child.emit('exit', 0, null);
   assert.equal(manager.getRuntimeDescriptor(), null);
   assert.equal(manager.getStatus(), STATUS.CRASHED);
+});
+
+test('starts a Managed descriptor from DshRuntimeManager with the web subcommand', async () => {
+  await withTempDir(async (directory) => {
+    const runtimeRoot = path.join(directory, 'runtime');
+    const managedRoot = path.join(runtimeRoot, 'versions', '1.2.3');
+    await createPackageTree(managedRoot, { version: '1.2.3' });
+
+    const stateStore = new RuntimeStateStore({
+      filePath: path.join(runtimeRoot, 'state.json'),
+      logger: createLogger(),
+    });
+    const state = createDefaultRuntimeState();
+    state.current = { relativePath: '1.2.3', kind: 'managed', version: '1.2.3' };
+    await stateStore.save(state);
+
+    const runtimeManager = new DshRuntimeManager({
+      stateStore,
+      runtimeRoot,
+      bundledRoot: path.join(directory, 'bundled-runtime'),
+      nodeCommandResolver: async () => 'C:/node/node.exe',
+      logger: createLogger(),
+    });
+    const runtimeDescriptor = await runtimeManager.resolveCurrentRuntime();
+    const child = createChild(4327);
+    const calls = [];
+    const manager = createManager({
+      spawnImpl(command, args, options) {
+        calls.push({ command, args, options });
+        return child;
+      },
+    });
+
+    const started = manager.start(runtimeDescriptor);
+    child.emit('spawn');
+
+    assert.equal(await started, true);
+    assert.equal(runtimeDescriptor.kind, 'managed');
+    assert.deepEqual(calls, [{
+      command: runtimeDescriptor.command,
+      args: [runtimeDescriptor.cliEntry, 'web'],
+      options: {
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: process.env,
+      },
+    }]);
+
+    child.emit('exit', 0, null);
+  });
 });
 
 test('legacy start without a descriptor uses the legacy resolver', async () => {
