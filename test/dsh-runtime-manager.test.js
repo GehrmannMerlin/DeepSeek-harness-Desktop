@@ -48,6 +48,11 @@ async function pathExists(targetPath) {
   }
 }
 
+async function createJunction(targetPath, junctionPath) {
+  await fs.mkdir(path.dirname(junctionPath), { recursive: true });
+  await fs.symlink(targetPath, junctionPath, 'junction');
+}
+
 function runtimeReference(version, relativePath = version) {
   return { relativePath, kind: 'managed', version };
 }
@@ -259,6 +264,59 @@ test('invalid target is isolated and replaced safely', async () => {
     assert.ok(isolatedName);
     assert.equal(await fs.readFile(path.join(runtimeRoot, 'versions', isolatedName, 'untrusted.txt'), 'utf8'), 'do not overwrite');
     assert.equal(await pathExists(stagingRoot), false);
+  });
+});
+
+test('isolates an ordinary file target without treating it as a reparse point', async () => {
+  await withTempDir(async (directory) => {
+    const runtimeRoot = path.join(directory, 'runtime');
+    const targetRoot = path.join(runtimeRoot, 'versions', '1.2.3');
+    const stagingRoot = path.join(runtimeRoot, 'staging', '1.2.3-install-file');
+    await fs.mkdir(path.dirname(targetRoot), { recursive: true });
+    await fs.writeFile(targetRoot, 'invalid target file', 'utf8');
+    await writeRuntime(stagingRoot, '1.2.3');
+    const manager = createManager({ state: null, runtimeRoot, bundledRoot: path.join(directory, 'bundled') });
+
+    await manager.promoteStaging(stagingRoot, '1.2.3');
+    const entries = await fs.readdir(path.join(runtimeRoot, 'versions'));
+    const isolatedName = entries.find((entry) => entry.startsWith('1.2.3.invalid-'));
+
+    assert.ok(isolatedName);
+    assert.equal(await fs.readFile(path.join(runtimeRoot, 'versions', isolatedName), 'utf8'), 'invalid target file');
+  });
+});
+
+test('rejects a staging junction to an external valid runtime', async () => {
+  await withTempDir(async (directory) => {
+    const runtimeRoot = path.join(directory, 'runtime');
+    const externalRoot = path.join(directory, 'external-runtime');
+    const stagingRoot = path.join(runtimeRoot, 'staging', '1.2.3-install-link');
+    await writeRuntime(externalRoot, '1.2.3');
+    await createJunction(externalRoot, stagingRoot);
+    const manager = createManager({ state: null, runtimeRoot, bundledRoot: path.join(directory, 'bundled') });
+
+    await assert.rejects(() => manager.promoteStaging(stagingRoot, '1.2.3'), /staging runtime root is unsafe/i);
+
+    assert.equal(await fs.realpath(stagingRoot), await fs.realpath(externalRoot));
+    assert.equal(await pathExists(path.join(runtimeRoot, 'versions', '1.2.3')), false);
+  });
+});
+
+test('rejects a versions junction to an external valid runtime instead of reusing it', async () => {
+  await withTempDir(async (directory) => {
+    const runtimeRoot = path.join(directory, 'runtime');
+    const externalRoot = path.join(directory, 'external-runtime');
+    const stagingRoot = path.join(runtimeRoot, 'staging', '1.2.3-install-real');
+    const targetRoot = path.join(runtimeRoot, 'versions', '1.2.3');
+    await writeRuntime(externalRoot, '1.2.3');
+    await writeRuntime(stagingRoot, '1.2.3');
+    await createJunction(externalRoot, targetRoot);
+    const manager = createManager({ state: null, runtimeRoot, bundledRoot: path.join(directory, 'bundled') });
+
+    await assert.rejects(() => manager.promoteStaging(stagingRoot, '1.2.3'), /managed runtime target is unsafe/i);
+
+    assert.equal(await fs.realpath(targetRoot), await fs.realpath(externalRoot));
+    assert.equal(await pathExists(stagingRoot), true);
   });
 });
 

@@ -117,8 +117,8 @@ class DshRuntimeManager {
     if (typeof version !== 'string' || !semver.valid(version) || path.isAbsolute(version) ||
         version.includes('/') || version.includes('\\')) return null;
     const versionsDir = path.join(this.runtimeRoot, 'versions');
-    const rootPath = path.resolve(versionsDir, version);
-    if (!isPathWithin(versionsDir, rootPath)) return null;
+    const rootPath = directChildPath(versionsDir, version);
+    if (!rootPath || !(await this.inspectManagedRoot(rootPath, versionsDir)).safe) return null;
     return this.validateRuntime(rootPath, version, 'managed');
   }
 
@@ -181,26 +181,34 @@ class DshRuntimeManager {
       throw new TypeError('Staging runtime must be a direct child of runtime staging');
     }
 
+    if (!(await this.inspectManagedRoot(resolvedStaging, stagingDir)).safe) {
+      throw new Error('Staging runtime root is unsafe');
+    }
     const validatedStaging = await this.validateRuntime(resolvedStaging, version, 'managed');
     if (!validatedStaging) throw new Error('Staging runtime failed validation');
 
     const targetRoot = directChildPath(versionsDir, version);
     if (!targetRoot) throw new Error('Invalid managed runtime target');
-    const existing = await this.validateRuntime(targetRoot, version, 'managed');
-    if (existing) return existing;
-
-    try {
-      await this.fs.lstat(targetRoot);
+    await this.fs.mkdir(versionsDir, { recursive: true });
+    const targetInspection = await this.inspectManagedRoot(targetRoot, versionsDir);
+    if (targetInspection.exists && !targetInspection.safeForRename) {
+      throw new Error('Managed runtime target is unsafe');
+    }
+    if (targetInspection.exists) {
+      const existing = targetInspection.safe && await this.validateRuntime(targetRoot, version, 'managed');
+      if (existing) return existing;
       await this.isolateInvalidTarget(versionsDir, targetRoot, version);
-    } catch (error) {
-      if (!error || error.code !== 'ENOENT') throw error;
     }
 
-    await this.fs.mkdir(versionsDir, { recursive: true });
-    if (!isPathWithin(path.resolve(stagingDir), resolvedStaging) || !isPathWithin(path.resolve(versionsDir), targetRoot)) {
+    const stagingBeforeRename = await this.inspectManagedRoot(resolvedStaging, stagingDir);
+    const targetBeforeRename = await this.inspectManagedRoot(targetRoot, versionsDir);
+    if (!stagingBeforeRename.safe || targetBeforeRename.exists || !targetBeforeRename.safe) {
       throw new Error('Runtime promotion paths escaped their expected roots');
     }
     await this.fs.rename(resolvedStaging, targetRoot);
+    if (!(await this.inspectManagedRoot(targetRoot, versionsDir)).safe) {
+      throw new Error('Promoted runtime root is unsafe');
+    }
     const promoted = await this.validateRuntime(targetRoot, version, 'managed');
     if (!promoted) throw new Error('Promoted runtime failed validation');
     return promoted;
@@ -209,6 +217,10 @@ class DshRuntimeManager {
   async isolateInvalidTarget(versionsDir, targetRoot, version) {
     const resolvedVersions = path.resolve(versionsDir);
     if (!isPathWithin(resolvedVersions, targetRoot) || path.dirname(targetRoot) !== resolvedVersions) {
+      throw new Error('Invalid runtime isolation target');
+    }
+    const targetInspection = await this.inspectManagedRoot(targetRoot, versionsDir);
+    if (!targetInspection.exists || !targetInspection.safeForRename) {
       throw new Error('Invalid runtime isolation target');
     }
     let attempt = 0;
@@ -370,6 +382,50 @@ class DshRuntimeManager {
     }
     if (reference.kind === 'bundled') return this.resolveBundledFallback();
     return null;
+  }
+
+  async inspectManagedRoot(rootPath, parentPath) {
+    const resolvedParent = path.resolve(parentPath);
+    const resolvedRoot = typeof rootPath === 'string' ? path.resolve(rootPath) : null;
+    if (!resolvedRoot || !isPathWithin(resolvedParent, resolvedRoot) || path.dirname(resolvedRoot) !== resolvedParent) {
+      return { exists: false, safe: false, safeForRename: false };
+    }
+    try {
+      const [runtimeRealPath, parentStats, parentRealPath] = await Promise.all([
+        this.fs.realpath(this.runtimeRoot),
+        this.fs.lstat(resolvedParent),
+        this.fs.realpath(resolvedParent),
+      ]);
+      if (!parentStats.isDirectory() || parentStats.isSymbolicLink() ||
+          !isPathWithin(runtimeRealPath, parentRealPath) && runtimeRealPath !== parentRealPath) {
+        return { exists: false, safe: false, safeForRename: false };
+      }
+    } catch {
+      return { exists: false, safe: false, safeForRename: false };
+    }
+    let rootStats;
+    try {
+      rootStats = await this.fs.lstat(resolvedRoot);
+    } catch (error) {
+      return error && error.code === 'ENOENT'
+        ? { exists: false, safe: true, safeForRename: true }
+        : { exists: false, safe: false, safeForRename: false };
+    }
+    if (rootStats.isSymbolicLink()) return { exists: true, safe: false, safeForRename: false };
+    try {
+      const [runtimeRealPath, rootRealPath] = await Promise.all([
+        this.fs.realpath(this.runtimeRoot),
+        this.fs.realpath(resolvedRoot),
+      ]);
+      const physicallyContained = isPathWithin(runtimeRealPath, rootRealPath);
+      return {
+        exists: true,
+        safe: rootStats.isDirectory() && physicallyContained,
+        safeForRename: physicallyContained,
+      };
+    } catch {
+      return { exists: true, safe: false, safeForRename: false };
+    }
   }
 }
 
