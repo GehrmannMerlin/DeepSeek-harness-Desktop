@@ -35,18 +35,27 @@ function looksLikeHarness(body) {
   return SIGNATURES.some((s) => (body || '').includes(s));
 }
 
-async function check(url, { timeout = 1500 } = {}) {
-  const res = await httpGet(url, timeout);
+async function check(url, { timeout = 1500, transport = httpGet } = {}) {
+  const res = await transport(url, timeout);
   if (res.error) return { ready: false, isHarness: false, status: null, error: res.error };
   const isHarness = res.status === 200 && looksLikeHarness(res.body);
   return { ready: isHarness, isHarness, status: res.status, error: null };
 }
 
-async function waitUntilReady(url, { interval = 800, timeout = 45000 } = {}) {
+async function waitUntilReady(url, {
+  interval = 800,
+  timeout = 45000,
+  checkFn = check,
+  transport = httpGet,
+} = {}) {
   const start = Date.now();
   mark('healthcheck_started', url);
   for (;;) {
-    const r = await check(url);
+    const remaining = Math.max(1, timeout - (Date.now() - start));
+    const r = await checkFn(url, {
+      timeout: Math.min(1500, remaining),
+      transport,
+    });
     if (r.ready) { mark('healthcheck_first_success', `${Date.now() - start}ms`); return { ok: true, elapsed: Date.now() - start }; }
     if (Date.now() - start >= timeout) return { ok: false, elapsed: Date.now() - start };
     await new Promise((res) => setTimeout(res, interval));

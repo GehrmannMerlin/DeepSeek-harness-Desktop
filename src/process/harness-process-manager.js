@@ -19,13 +19,24 @@ const STATUS = Object.freeze({
 // Single owner of the dsh child process. Only this module spawns, stops and
 // restarts Harness; everything else (window, tray, lifecycle) reads its state.
 class HarnessProcessManager extends EventEmitter {
-  constructor({ logger }) {
+  constructor({
+    logger,
+    spawnImpl = spawn,
+    resolveCommandImpl = resolveCommand,
+    killTreeImpl = killTree,
+    isAliveImpl = isAlive,
+  }) {
     super();
     this.logger = logger;
+    this.spawnImpl = spawnImpl;
+    this.resolveCommandImpl = resolveCommandImpl;
+    this.killTreeImpl = killTreeImpl;
+    this.isAliveImpl = isAliveImpl;
     this.status = STATUS.STOPPED;
     this.child = null;
     this.pid = null;
     this.ownership = null; // 'owned' | 'external' | null
+    this.runtimeDescriptor = null;
     this.url = null;
     this.exitCode = null;
     this._expectedStop = false;
@@ -40,6 +51,7 @@ class HarnessProcessManager extends EventEmitter {
   ownsHarness() { return this.ownership === 'owned'; }
   getUrl() { return this.url; }
   getPid() { return this.pid; }
+  getRuntimeDescriptor() { return this.runtimeDescriptor; }
 
   _setStatus(next) {
     if (this.status === next) return;
@@ -52,6 +64,7 @@ class HarnessProcessManager extends EventEmitter {
   // Adopt an already-running Harness we did not spawn. Exit must NOT kill it.
   markExternal(url) {
     this.ownership = 'external';
+    this.runtimeDescriptor = null;
     this.url = url;
     this.pid = null;
     this._setStatus(STATUS.RUNNING);
@@ -66,23 +79,25 @@ class HarnessProcessManager extends EventEmitter {
     }
   }
 
-  start() {
+  start(runtimeDescriptor = null) {
     if (this.child) {
       this.logger.warn('start() ignored: a child is already tracked');
       return Promise.resolve(false);
     }
     this.ownership = 'owned';
+    this.runtimeDescriptor = runtimeDescriptor;
     this.url = null;
     this.exitCode = null;
     this._expectedStop = false;
     this._setStatus(STATUS.STARTING);
 
-    const { command, args } = resolveCommand();
+    const { command, args } = runtimeDescriptor || this.resolveCommandImpl();
     this.logger.info(`spawn: ${command} ${args.join(' ')}`);
     mark('dsh_spawn_started', `${command} ${args.join(' ')}`);
 
     return new Promise((resolve) => {
-      const child = spawn(command, args, {
+      const child = this.spawnImpl(command, args, {
+        shell: false,
         windowsHide: true,           // no console window
         stdio: ['ignore', 'pipe', 'pipe'], // capture stdout/stderr for URL + logs
         env: process.env,
@@ -106,6 +121,7 @@ class HarnessProcessManager extends EventEmitter {
         settle(false);
         this.child = null;
         this.pid = null;
+        this.runtimeDescriptor = null;
         this._setStatus(STATUS.FAILED);
       });
 
@@ -137,6 +153,7 @@ class HarnessProcessManager extends EventEmitter {
         this.exitCode = code;
         this.child = null;
         this.pid = null;
+        this.runtimeDescriptor = null;
         this.emit('exit', { code, signal });
         if (this._expectedStop || this.status === STATUS.STOPPING) {
           this._setStatus(STATUS.STOPPED);
@@ -172,12 +189,12 @@ class HarnessProcessManager extends EventEmitter {
       forceTimer = setTimeout(finish, 6000);
 
       // Graceful first (best effort), then force if still alive.
-      killTree(pid, { force: false }).then((res) => {
+      this.killTreeImpl(pid, { force: false }).then((res) => {
         this.logger.info(`stop(): graceful result ok=${res.ok} err=${res.err.trim()}`);
         setTimeout(() => {
-          if (isAlive(pid)) {
+          if (this.isAliveImpl(pid)) {
             this.logger.info(`stop(): still alive, force killing tree pid=${pid}`);
-            killTree(pid, { force: true }).then((r2) => {
+            this.killTreeImpl(pid, { force: true }).then((r2) => {
               this.logger.info(`stop(): force result ok=${r2.ok} err=${r2.err.trim()}`);
             });
           } else {
@@ -189,8 +206,9 @@ class HarnessProcessManager extends EventEmitter {
   }
 
   async restart() {
+    const runtimeDescriptor = this.runtimeDescriptor;
     await this.stop();
-    return this.start();
+    return this.start(runtimeDescriptor);
   }
 }
 
