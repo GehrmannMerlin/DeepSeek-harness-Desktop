@@ -4,10 +4,12 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs').promises;
 const semver = require('semver');
 const { killTree } = require('../process/process-tree');
+const { resolveNpmInvocation } = require('./npm-command');
 
 const PACKAGE_NAME = '@deepseek-ai/dsh';
 const DEFAULT_TIMEOUT_MS = 120000;
 const MAX_OUTPUT_BYTES = 16 * 1024;
+const DEFAULT_NPM_COMMAND = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function appendBounded(current, chunk) {
   const remaining = MAX_OUTPUT_BYTES - Buffer.byteLength(current);
@@ -20,7 +22,7 @@ function logResult(logger, result) {
   logger.info(`DSH npm install pid=${result.pid || 'unknown'} code=${result.code} signal=${result.signal || 'none'} timedOut=${result.timedOut} durationMs=${result.durationMs} stdout=${JSON.stringify(result.stdout)} stderr=${JSON.stringify(result.stderr)}`);
 }
 
-function NpmInstaller({ npmCommand, spawnProcess = spawn, killProcess = killTree, logger, installTimeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+function NpmInstaller({ npmCommand = DEFAULT_NPM_COMMAND, spawnProcess = spawn, killProcess = killTree, logger, installTimeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   async function install({ stagingRoot, packageName, version } = {}) {
     const startedAt = Date.now();
     const baseResult = { stagingRoot, code: null, signal: null, timedOut: false, durationMs: 0, stdout: '', stderr: '', error: null };
@@ -36,8 +38,12 @@ function NpmInstaller({ npmCommand, spawnProcess = spawn, killProcess = killTree
 
     const args = ['install', '--prefix', stagingRoot, '--no-audit', '--no-fund', `${PACKAGE_NAME}@${version}`];
     let child;
+    let invocation;
     try {
-      child = spawnProcess(npmCommand, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      invocation = spawnProcess === spawn
+        ? await resolveNpmInvocation(npmCommand)
+        : { command: npmCommand, argsPrefix: [] };
+      child = spawnProcess(invocation.command, [...invocation.argsPrefix, ...args], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
       return { ok: false, ...baseResult, durationMs: Date.now() - startedAt, error: error.message };
     }
@@ -92,4 +98,4 @@ function NpmInstaller({ npmCommand, spawnProcess = spawn, killProcess = killTree
   return { install };
 }
 
-module.exports = { NpmInstaller, PACKAGE_NAME, MAX_OUTPUT_BYTES };
+module.exports = { NpmInstaller, PACKAGE_NAME, MAX_OUTPUT_BYTES, DEFAULT_NPM_COMMAND };

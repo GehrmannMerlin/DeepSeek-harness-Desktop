@@ -14,6 +14,11 @@ extraResources:
     to: bundled-runtime
     filter:
       - '**/*'
+      - 'node_modules/**/*'
+  - from: build/bundled-runtime/node_modules
+    to: bundled-runtime/node_modules
+    filter:
+      - '**/*'
 win:
   target:
     - nsis

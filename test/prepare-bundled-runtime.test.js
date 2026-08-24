@@ -8,6 +8,7 @@ const test = require('node:test');
 
 const {
   DEFAULT_BUNDLED_VERSION,
+  DEFAULT_INSTALL_TIMEOUT_MS,
   exactSemver,
   prepareBundledRuntime,
   resolveBundledVersion,
@@ -43,6 +44,7 @@ async function installFixture(args, { version, invalid = null } = {}) {
 
 test('bundled version defaults to the pinned exact SemVer and accepts only exact overrides', () => {
   assert.equal(DEFAULT_BUNDLED_VERSION, '0.1.0-rc.7');
+  assert.equal(DEFAULT_INSTALL_TIMEOUT_MS, 10 * 60 * 1000);
   assert.equal(exactSemver('1.2.3'), '1.2.3');
   assert.equal(exactSemver('1.2.3-rc.1'), '1.2.3-rc.1');
   for (const invalid of ['', ' 1.2.3', 'v1.2.3', '1.2', '^1.2.3', 'latest', null]) {
@@ -151,6 +153,8 @@ test('builder maps generated runtime outside asar and keeps build output ignored
   assert.match(builder, /from:\s*build\/bundled-runtime/);
   assert.match(builder, /to:\s*bundled-runtime/);
   assert.match(builder, /'\*\*\/\*'/);
+  assert.match(builder, /node_modules\/\*\*\/\*/);
+  assert.match(builder, /from:\s*build\/bundled-runtime\/node_modules/);
   assert.match(ignore, /(?:^|\n)build\/bundled-runtime\/(?:\n|$)/);
   assert.match(packageJson.scripts['prepare:bundled-runtime'], /prepare-bundled-runtime/);
   assert.match(packageJson.scripts.pack, /prepare:bundled-runtime/);

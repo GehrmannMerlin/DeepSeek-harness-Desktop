@@ -7,10 +7,11 @@ const path = require('node:path');
 const semver = require('semver');
 
 const { verifyRuntime } = require('../src/update/runtime-verifier');
+const { resolveNpmInvocation } = require('../src/update/npm-command');
 
 const PACKAGE_NAME = '@deepseek-ai/dsh';
 const DEFAULT_BUNDLED_VERSION = '0.1.0-rc.7';
-const DEFAULT_INSTALL_TIMEOUT_MS = 120000;
+const DEFAULT_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_NPM_COMMAND = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function exactSemver(value) {
@@ -41,7 +42,7 @@ function defaultSpawnProcess(command, args, options) {
   return spawn(command, args, options);
 }
 
-function runNpmInstall({ npmCommand, stagingRoot, version, spawnProcess, installTimeoutMs }) {
+async function runNpmInstall({ npmCommand, stagingRoot, version, spawnProcess, installTimeoutMs }) {
   const args = [
     'install',
     '--prefix', stagingRoot,
@@ -53,10 +54,19 @@ function runNpmInstall({ npmCommand, stagingRoot, version, spawnProcess, install
     `${PACKAGE_NAME}@${version}`,
   ];
 
+  let invocation;
+  try {
+    invocation = spawnProcess === defaultSpawnProcess
+      ? await resolveNpmInvocation(npmCommand)
+      : { command: npmCommand, argsPrefix: [] };
+  } catch (error) {
+    throw error;
+  }
+
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawnProcess(npmCommand, args, {
+      child = spawnProcess(invocation.command, [...invocation.argsPrefix, ...args], {
         shell: false,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -208,6 +218,7 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_BUNDLED_VERSION,
+  DEFAULT_INSTALL_TIMEOUT_MS,
   DEFAULT_NPM_COMMAND,
   PACKAGE_NAME,
   exactSemver,
