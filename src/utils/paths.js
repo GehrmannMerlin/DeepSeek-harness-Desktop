@@ -20,4 +20,36 @@ function getLogsDir() {
   return dir;
 }
 
-module.exports = { APP_ROOT, asset, renderer, getLogsDir };
+function getRuntimeRoot() {
+  return path.join(app.getPath('userData'), 'runtime');
+}
+
+function getManagedVersionsDir() {
+  return path.join(getRuntimeRoot(), 'versions');
+}
+
+function getStagingDir() {
+  return path.join(getRuntimeRoot(), 'staging');
+}
+
+function getRuntimeStatePath() {
+  return path.join(getRuntimeRoot(), 'state.json');
+}
+
+function getBundledRuntimeRoot() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'bundled-runtime')
+    : path.join(APP_ROOT, 'build', 'bundled-runtime');
+}
+
+module.exports = {
+  APP_ROOT,
+  asset,
+  renderer,
+  getLogsDir,
+  getRuntimeRoot,
+  getManagedVersionsDir,
+  getStagingDir,
+  getRuntimeStatePath,
+  getBundledRuntimeRoot,
+};
