@@ -9,6 +9,11 @@ files:
   - assets/**
   - package.json
 asar: true
+extraResources:
+  - from: build/bundled-runtime
+    to: bundled-runtime
+    filter:
+      - '**/*'
 win:
   target:
     - nsis
