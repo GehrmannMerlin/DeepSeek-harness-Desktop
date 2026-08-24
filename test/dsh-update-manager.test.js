@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -34,6 +35,13 @@ function createHarness({
   healthResults = [{ ok: true }],
   failedVersions = {},
   clock = () => Date.parse('2026-08-24T00:00:00.000Z'),
+  pendingVersion = latestVersion,
+  runtimeActivate,
+  runtimeRollback,
+  processStop,
+  processStart,
+  deferredUrl = false,
+  urlWaitTimeoutMs,
 } = {}) {
   const calls = [];
   const stateChanges = [];
@@ -43,7 +51,7 @@ function createHarness({
   const current = descriptor(currentVersion);
   const prepared = descriptor(latestVersion);
   const previous = descriptor('0.9.0');
-  const pending = descriptor(latestVersion);
+  const pending = pendingVersion === null ? null : descriptor(pendingVersion);
   const healthQueue = [...healthResults];
   const runtimeManager = {
     runtimeRoot: path.join(process.cwd(), 'test-fixtures', 'runtime-root'),
@@ -53,8 +61,16 @@ function createHarness({
       calls.push(['promote', stagingRoot, version]);
       return prepared;
     },
-    async activateRuntime(runtime) { calls.push(['activate', runtime.version]); return { current: runtime.version }; },
-    async rollbackRuntime() { calls.push('rollback'); return previous; },
+    async activateRuntime(runtime) {
+      calls.push(['activate', runtime.version]);
+      if (runtimeActivate) return runtimeActivate(runtime);
+      return { current: runtime.version };
+    },
+    async rollbackRuntime() {
+      calls.push('rollback');
+      if (runtimeRollback) return runtimeRollback();
+      return previous;
+    },
     async recordPending(runtime) { calls.push(['pending', runtime.version]); },
     async consumePendingIfValid() { calls.push('consume-pending'); return pending; },
     async nodeCommandResolver() { return process.execPath; },
@@ -84,13 +100,43 @@ function createHarness({
       return { ok: true };
     },
   };
-  const processManager = {
+  const processManager = deferredUrl ? new EventEmitter() : {
     ownsHarness() { return ownsHarness; },
     getPid() { return ownsHarness ? 1234 : null; },
     getUrl() { return 'http://127.0.0.1:3000/'; },
-    async stop() { calls.push('stop'); return true; },
-    async start(runtime) { calls.push(['start', runtime.version]); return true; },
+    async stop() {
+      calls.push('stop');
+      if (processStop) return processStop(calls.filter((call) => call === 'stop').length);
+      return true;
+    },
+    async start(runtime) {
+      calls.push(['start', runtime.version]);
+      if (processStart) return processStart(runtime);
+      return true;
+    },
   };
+  if (deferredUrl) {
+    let url = null;
+    Object.assign(processManager, {
+      ownsHarness() { return ownsHarness; },
+      getPid() { return ownsHarness ? 1234 : null; },
+      getUrl() { return url; },
+      async stop() {
+        calls.push('stop');
+        if (processStop) return processStop(calls.filter((call) => call === 'stop').length);
+        return true;
+      },
+      async start(runtime) {
+        calls.push(['start', runtime.version]);
+        if (processStart) return processStart(runtime);
+        setImmediate(() => {
+          url = 'http://127.0.0.1:3000/';
+          processManager.emit('url-detected', url);
+        });
+        return true;
+      },
+    });
+  }
   const healthChecker = {
     async waitUntilReady(url) {
       calls.push(['health', url]);
@@ -106,12 +152,13 @@ function createHarness({
     healthChecker,
     logger: silentLogger,
     clock,
+    urlWaitTimeoutMs,
   });
   manager.on('state-change', (event) => stateChanges.push(event));
   manager.on('progress', (event) => progressEvents.push(event));
   manager.on('notification', (event) => notifications.push(event));
   manager.on('update-available', (event) => updates.push(event));
-  return { manager, calls, stateChanges, progressEvents, notifications, updates, runtimeManager, installer };
+  return { manager, calls, stateChanges, progressEvents, notifications, updates, runtimeManager, installer, processManager };
 }
 
 test('no newer runtime becomes UP_TO_DATE without installing or stopping', async () => {
@@ -137,6 +184,27 @@ test('newer latest emits one update event and exposes an immutable snapshot', as
   assert.equal(h.notifications.length, 1);
   first.latest.version = '9.9.9';
   assert.equal(h.manager.getSnapshot().latest.version, '1.1.0');
+});
+
+test('automatic checks run once per manager while manual checks bypass the automatic gate', async () => {
+  const h = createHarness();
+
+  await h.manager.checkForUpdates();
+  await h.manager.checkForUpdates();
+  await h.manager.checkForUpdates({ manual: true });
+
+  assert.equal(h.calls.filter((call) => call === 'registry').length, 2);
+});
+
+test('invalid Registry metadata fails before any installer operation', async () => {
+  const h = createHarness({
+    registryGetLatest: async () => ({ packageName: PACKAGE_NAME, version: 'not-semver', distTag: 'latest' }),
+  });
+
+  const snapshot = await h.manager.checkForUpdates();
+
+  assert.equal(snapshot.state, STATES.FAILED);
+  assert.equal(h.calls.includes('install'), false);
 });
 
 test('automatic registry failure is visible as an error but not a notification', async () => {
@@ -201,6 +269,24 @@ test('owned update installs, verifies, promotes, stops, activates, restarts, and
     'checking', null, 'preparing', 'installing', 'verifying', 'ready-to-apply',
     'stopping', 'switching', 'restarting', null,
   ]);
+  assert.equal(snapshot.updateAvailable, false);
+  assert.equal(snapshot.latest, null);
+  assert.equal(snapshot.preparedRuntime, null);
+  assert.equal(snapshot.operationId, null);
+});
+
+test('owned failure before activation restores the original current descriptor without runtime rollback', async () => {
+  const h = createHarness({ runtimeActivate: async () => { throw new Error('state write failed'); } });
+  await h.manager.checkForUpdates();
+
+  const snapshot = await h.manager.confirmUpdate();
+
+  assert.equal(snapshot.state, STATES.ROLLED_BACK);
+  assert.equal(snapshot.currentRuntime.version, '1.0.0');
+  assert.equal(h.calls.includes('rollback'), false);
+  assert.deepEqual(h.calls.map((call) => Array.isArray(call) ? call[0] : call).slice(-4), [
+    'stop', 'activate', 'start', 'health',
+  ]);
 });
 
 test('owned update rolls back after new runtime health failure', async () => {
@@ -249,6 +335,81 @@ test('pending activation recovery activates only after successful health and cle
   assert.deepEqual(h.calls.map((call) => Array.isArray(call) ? call[0] : call), [
     'consume-pending', 'resolve-current', 'stop', 'start', 'health', 'activate',
   ]);
+});
+
+test('pending start or health failure restores the current descriptor and preserves pending', async () => {
+  const h = createHarness({ healthResults: [{ ok: false }, { ok: true }] });
+
+  const snapshot = await h.manager.recoverPendingActivation();
+
+  assert.equal(snapshot.state, STATES.ROLLED_BACK);
+  assert.equal(snapshot.pending, true);
+  assert.equal(snapshot.currentRuntime.version, '1.0.0');
+  assert.deepEqual(h.calls.map((call) => Array.isArray(call) ? call[0] : call), [
+    'consume-pending', 'resolve-current', 'stop', 'start', 'health', 'stop', 'start', 'health',
+  ]);
+});
+
+test('pending stop failure still attempts current-runtime recovery and preserves pending', async () => {
+  const h = createHarness({ processStop: (count) => { if (count === 1) throw new Error('stop failed'); return true; } });
+
+  const snapshot = await h.manager.recoverPendingActivation();
+
+  assert.equal(snapshot.state, STATES.ROLLED_BACK);
+  assert.equal(snapshot.pending, true);
+  assert.deepEqual(h.calls.map((call) => Array.isArray(call) ? call[0] : call), [
+    'consume-pending', 'resolve-current', 'stop', 'start', 'health',
+  ]);
+});
+
+test('pending activation failure restores current runtime without clearing pending', async () => {
+  const h = createHarness({ runtimeActivate: async () => { throw new Error('pending state write failed'); } });
+
+  const snapshot = await h.manager.recoverPendingActivation();
+
+  assert.equal(snapshot.state, STATES.ROLLED_BACK);
+  assert.equal(snapshot.pending, true);
+  assert.equal(snapshot.currentRuntime.version, '1.0.0');
+  assert.deepEqual(h.calls.map((call) => Array.isArray(call) ? call[0] : call), [
+    'consume-pending', 'resolve-current', 'stop', 'start', 'health', 'activate', 'stop', 'start', 'health',
+  ]);
+});
+
+test('pending recovery failure becomes fatal when the original current runtime cannot recover', async () => {
+  const h = createHarness({ healthResults: [{ ok: false }, { ok: false }] });
+
+  const snapshot = await h.manager.recoverPendingActivation();
+
+  assert.equal(snapshot.state, STATES.FAILED);
+  assert.equal(snapshot.error.fatal, true);
+  assert.equal(snapshot.pending, true);
+  assert.deepEqual(h.calls.map((call) => Array.isArray(call) ? call[0] : call), [
+    'consume-pending', 'resolve-current', 'stop', 'start', 'health', 'stop', 'start', 'health', 'stop',
+  ]);
+});
+
+test('rollback fallback failure becomes fatal after an activated runtime fails health', async () => {
+  const h = createHarness({
+    healthResults: [{ ok: false }],
+    runtimeRollback: async () => { throw new Error('fallback unavailable'); },
+  });
+  await h.manager.checkForUpdates();
+
+  const snapshot = await h.manager.confirmUpdate();
+
+  assert.equal(snapshot.state, STATES.FAILED);
+  assert.equal(snapshot.error.fatal, true);
+  assert.equal(h.calls.includes('rollback'), true);
+});
+
+test('URL detection wait is injectable and captures a URL event after start', async () => {
+  const h = createHarness({ deferredUrl: true, urlWaitTimeoutMs: 10 });
+  await h.manager.checkForUpdates();
+
+  const snapshot = await h.manager.confirmUpdate();
+
+  assert.equal(snapshot.state, STATES.SUCCESS);
+  assert.equal(h.calls.filter((call) => Array.isArray(call) && call[0] === 'health').length, 1);
 });
 
 test('automatic notification for a failed version is suppressed for 24 hours', async () => {

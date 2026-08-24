@@ -26,9 +26,10 @@ const STATES = Object.freeze({
 });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_URL_WAIT_TIMEOUT_MS = 45 * 1000;
 
 const ALLOWED_TRANSITIONS = Object.freeze({
-  [STATES.IDLE]: new Set([STATES.CHECKING, STATES.READY_TO_APPLY]),
+  [STATES.IDLE]: new Set([STATES.CHECKING, STATES.READY_TO_APPLY, STATES.FAILED]),
   [STATES.CHECKING]: new Set([STATES.UP_TO_DATE, STATES.UPDATE_AVAILABLE, STATES.FAILED]),
   [STATES.UP_TO_DATE]: new Set([STATES.CHECKING, STATES.READY_TO_APPLY]),
   [STATES.UPDATE_AVAILABLE]: new Set([STATES.CHECKING, STATES.PREPARING, STATES.IDLE, STATES.READY_TO_APPLY]),
@@ -81,6 +82,7 @@ class DshUpdateManager extends EventEmitter {
     healthChecker,
     logger = console,
     clock = () => Date.now(),
+    urlWaitTimeoutMs = DEFAULT_URL_WAIT_TIMEOUT_MS,
   } = {}) {
     super();
     for (const [name, dependency] of Object.entries({ runtimeManager, registry, installer, verifier, processManager, healthChecker })) {
@@ -94,8 +96,12 @@ class DshUpdateManager extends EventEmitter {
     this.healthChecker = healthChecker;
     this.logger = logger;
     this.clock = clock;
+    this.urlWaitTimeoutMs = Number.isFinite(urlWaitTimeoutMs) && urlWaitTimeoutMs >= 0
+      ? urlWaitTimeoutMs
+      : DEFAULT_URL_WAIT_TIMEOUT_MS;
     this.operationPromise = null;
     this.operationCounter = 0;
+    this.automaticCheckCompleted = false;
     this.availableEventVersion = null;
     this.notificationVersion = null;
     this.newProcessStarted = false;
@@ -122,7 +128,16 @@ class DshUpdateManager extends EventEmitter {
   }
 
   checkForUpdates({ manual = false } = {}) {
-    return this._runOperation(() => this._checkForUpdates({ manual: Boolean(manual) }));
+    const isManual = Boolean(manual);
+    if (!isManual) {
+      if (this.operationPromise) {
+        this.automaticCheckCompleted = true;
+        return this.operationPromise;
+      }
+      if (this.automaticCheckCompleted) return Promise.resolve(this.getSnapshot());
+      this.automaticCheckCompleted = true;
+    }
+    return this._runOperation(() => this._checkForUpdates({ manual: isManual }));
   }
 
   confirmUpdate() {
@@ -249,41 +264,62 @@ class DshUpdateManager extends EventEmitter {
       return this.getSnapshot();
     }
 
-    return this._applyOwned(prepared, { preservePendingUntilSuccess: false, manual: true });
+    return this._applyOwned(prepared, {
+      preservePendingUntilSuccess: false,
+      manual: true,
+      originalCurrent: this.snapshot.currentRuntime,
+    });
   }
 
   async _recoverPendingActivation() {
     if (!this.processManager.ownsHarness()) return this.getSnapshot();
-    const pending = await this.runtimeManager.consumePendingIfValid();
-    if (!pending) return this.getSnapshot();
-
-    const current = await this.runtimeManager.resolveCurrentRuntime();
-    this._transition(STATES.READY_TO_APPLY, {
-      preparedRuntime: clone(pending),
-      pending: true,
-      operationId: this._newOperationId(pending.version),
-      error: null,
-      progress: { phase: 'ready-to-apply', version: pending.version },
-    });
+    let pending = null;
+    let current = null;
     try {
+      pending = await this.runtimeManager.consumePendingIfValid();
+      if (!pending) return this.getSnapshot();
+      current = await this.runtimeManager.resolveCurrentRuntime();
+      this._transition(STATES.READY_TO_APPLY, {
+        preparedRuntime: clone(pending),
+        pending: true,
+        operationId: this._newOperationId(pending.version),
+        error: null,
+        progress: { phase: 'ready-to-apply', version: pending.version },
+      });
       this.newProcessStarted = false;
       this._transition(STATES.STOPPING_CURRENT, { progress: { phase: 'stopping', version: pending.version } });
       await this.processManager.stop();
       this._transition(STATES.RESTARTING, { progress: { phase: 'restarting', version: pending.version } });
       await this._startAndCheck(pending);
       await this.runtimeManager.activateRuntime(pending);
-      this._transition(STATES.SUCCESS, { currentRuntime: clone(pending), pending: false, progress: null, error: null });
+      this._transition(STATES.SUCCESS, {
+        currentRuntime: clone(pending),
+        pending: false,
+        updateAvailable: false,
+        latest: null,
+        preparedRuntime: null,
+        operationId: null,
+        progress: null,
+        error: null,
+      });
     } catch (error) {
-      await this._stopFailedOwnedProcess();
+      if (!pending || !current) {
+        return this._handleFailure(error, { manual: false });
+      }
       await this._recordFailedVersion(pending.version);
       this._patch({ currentRuntime: clone(current), preparedRuntime: clone(pending), pending: true });
-      return this._handleFailure(error, { manual: false });
+      return this._restoreCurrentRuntime(current, error, {
+        manual: false,
+        pending: true,
+        preparedRuntime: pending,
+      });
     }
     return this.getSnapshot();
   }
 
-  async _applyOwned(prepared, { preservePendingUntilSuccess, manual = false }) {
+  async _applyOwned(prepared, { preservePendingUntilSuccess, manual = false, originalCurrent }) {
     let originalError = null;
+    let activated = false;
     try {
       this.newProcessStarted = false;
       this._transition(STATES.STOPPING_CURRENT, { progress: { phase: 'stopping', version: prepared.version } });
@@ -291,14 +327,18 @@ class DshUpdateManager extends EventEmitter {
       if (!preservePendingUntilSuccess) {
         this._transition(STATES.SWITCHING, { progress: { phase: 'switching', version: prepared.version } });
         await this.runtimeManager.activateRuntime(prepared);
+        activated = true;
       }
       this._transition(STATES.RESTARTING, { progress: { phase: 'restarting', version: prepared.version } });
       await this._startAndCheck(prepared);
       if (preservePendingUntilSuccess) await this.runtimeManager.activateRuntime(prepared);
       this._transition(STATES.SUCCESS, {
         currentRuntime: clone(prepared),
-        preparedRuntime: clone(prepared),
+        preparedRuntime: null,
         pending: false,
+        updateAvailable: false,
+        latest: null,
+        operationId: null,
         progress: null,
         error: null,
       });
@@ -308,7 +348,42 @@ class DshUpdateManager extends EventEmitter {
     }
 
     await this._recordFailedVersion(prepared.version);
+    if (!activated && originalCurrent) {
+      return this._restoreCurrentRuntime(originalCurrent, originalError, { manual, pending: false });
+    }
     return this._rollback(originalError, { manual });
+  }
+
+  async _restoreCurrentRuntime(currentRuntime, originalError, {
+    manual = false,
+    pending = false,
+    preparedRuntime = null,
+  } = {}) {
+    this._transition(STATES.ROLLING_BACK, {
+      progress: { phase: 'restoring-current', version: currentRuntime && currentRuntime.version },
+      error: errorDetails(originalError),
+    });
+    try {
+      await this._stopFailedOwnedProcess();
+      this._transition(STATES.RESTARTING, {
+        progress: { phase: 'restarting-current', version: currentRuntime.version },
+      });
+      await this._startAndCheck(currentRuntime);
+      this._transition(STATES.ROLLED_BACK, {
+        currentRuntime: clone(currentRuntime),
+        pending,
+        preparedRuntime: pending && preparedRuntime ? clone(preparedRuntime) : null,
+        updateAvailable: false,
+        latest: null,
+        operationId: null,
+        progress: null,
+        error: errorDetails(originalError),
+      });
+      return this.getSnapshot();
+    } catch (recoveryError) {
+      await this._stopFailedOwnedProcess();
+      return this._handleFailure(recoveryError, { manual, fatal: true });
+    }
   }
 
   async _rollback(originalError, { manual = false } = {}) {
@@ -360,10 +435,11 @@ class DshUpdateManager extends EventEmitter {
     if (!this.processManager.once) return null;
     return new Promise((resolve) => {
       let settled = false;
+      let timer = null;
       const finish = (url) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         if (typeof this.processManager.removeListener === 'function') {
           this.processManager.removeListener('url-detected', onUrl);
           this.processManager.removeListener('exit', onExit);
@@ -372,9 +448,11 @@ class DshUpdateManager extends EventEmitter {
       };
       const onUrl = (url) => finish(url);
       const onExit = () => finish(null);
-      const timer = setTimeout(() => finish(null), 5000);
       this.processManager.once('url-detected', onUrl);
       this.processManager.once('exit', onExit);
+      timer = setTimeout(() => finish(null), this.urlWaitTimeoutMs);
+      const afterAttach = this.processManager.getUrl && this.processManager.getUrl();
+      if (afterAttach) finish(afterAttach);
     });
   }
 
@@ -501,4 +579,4 @@ class DshUpdateManager extends EventEmitter {
   }
 }
 
-module.exports = { DshUpdateManager, STATES };
+module.exports = { DshUpdateManager, STATES, DEFAULT_URL_WAIT_TIMEOUT_MS };
