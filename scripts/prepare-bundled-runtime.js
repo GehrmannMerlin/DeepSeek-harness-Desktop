@@ -19,7 +19,7 @@ function exactSemver(value) {
 
 function resolveBundledVersion(version) {
   const requested = version === undefined
-    ? (process.env.DSH_BUNDLED_VERSION || DEFAULT_BUNDLED_VERSION)
+    ? (process.env.DSH_BUNDLED_VERSION === undefined ? DEFAULT_BUNDLED_VERSION : process.env.DSH_BUNDLED_VERSION)
     : version;
   const exact = exactSemver(requested);
   if (!exact) {

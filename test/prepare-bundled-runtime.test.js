@@ -54,6 +54,8 @@ test('bundled version defaults to the pinned exact SemVer and accepts only exact
     assert.equal(resolveBundledVersion(), DEFAULT_BUNDLED_VERSION);
     process.env.DSH_BUNDLED_VERSION = '1.2.3-rc.4';
     assert.equal(resolveBundledVersion(), '1.2.3-rc.4');
+    process.env.DSH_BUNDLED_VERSION = '';
+    assert.throws(() => resolveBundledVersion(), /exact SemVer/);
     process.env.DSH_BUNDLED_VERSION = 'latest';
     assert.throws(() => resolveBundledVersion(), /exact SemVer/);
   } finally {
