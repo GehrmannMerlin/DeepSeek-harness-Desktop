@@ -14,8 +14,14 @@ const { withTempDir } = require('./test-helpers');
 
 test('missing state returns defaults without throwing', async () => {
   await withTempDir(async (directory) => {
-    const store = new RuntimeStateStore({ filePath: path.join(directory, 'nested', 'state.json') });
+    const errors = [];
+    const store = new RuntimeStateStore({
+      filePath: path.join(directory, 'nested', 'state.json'),
+      logger: { error: (...args) => errors.push(args) },
+    });
     assert.deepEqual(await store.load(), createDefaultRuntimeState());
+    assert.equal(errors.length, 1);
+    assert.match(String(errors[0][0]), /missing|not found/i);
   });
 });
 
@@ -43,6 +49,20 @@ test('corrupt JSON returns defaults and logs the parse failure', async () => {
   });
 });
 
+test('whitespace-only runtime paths return defaults and log the schema failure', async () => {
+  await withTempDir(async (directory) => {
+    const filePath = path.join(directory, 'state.json');
+    const state = createDefaultRuntimeState();
+    state.current = { relativePath: '   ', kind: 'managed', version: '1.2.3' };
+    await fs.writeFile(filePath, JSON.stringify(state), 'utf8');
+    const errors = [];
+    const store = new RuntimeStateStore({ filePath, logger: { error: (...args) => errors.push(args) } });
+    assert.deepEqual(await store.load(), createDefaultRuntimeState());
+    assert.equal(errors.length, 1);
+    assert.match(String(errors[0][0]), /schema/i);
+  });
+});
+
 test('update validates and atomically persists the mutation', async () => {
   await withTempDir(async (directory) => {
     const store = new RuntimeStateStore({ filePath: path.join(directory, 'state.json') });
@@ -56,4 +76,3 @@ test('update validates and atomically persists the mutation', async () => {
     await assert.rejects(fs.stat(`${store.filePath}.tmp`), { code: 'ENOENT' });
   });
 });
-

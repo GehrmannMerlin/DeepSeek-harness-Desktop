@@ -21,7 +21,7 @@ function createDefaultRuntimeState() {
 function isRuntimeReference(value) {
   return value === null || (
     value && typeof value === 'object' && !Array.isArray(value) &&
-    typeof value.relativePath === 'string' && value.relativePath.length > 0 &&
+    typeof value.relativePath === 'string' && value.relativePath.trim().length > 0 &&
     !path.isAbsolute(value.relativePath) &&
     RUNTIME_KINDS.has(value.kind) &&
     (value.kind === 'legacy' ? (value.version === 'unknown' || semver.valid(value.version) !== null) : semver.valid(value.version) !== null)
@@ -56,7 +56,10 @@ class RuntimeStateStore {
     try {
       raw = await this.fs.readFile(this.filePath, 'utf8');
     } catch (error) {
-      if (error && error.code === 'ENOENT') return createDefaultRuntimeState();
+      if (error && error.code === 'ENOENT') {
+        this.logger.error('Runtime state file missing; using defaults', this.filePath);
+        return createDefaultRuntimeState();
+      }
       this.logger.error('Unable to read runtime state; using defaults', error);
       return createDefaultRuntimeState();
     }
@@ -110,4 +113,3 @@ module.exports = {
   createDefaultRuntimeState,
   isValidRuntimeState,
 };
-
