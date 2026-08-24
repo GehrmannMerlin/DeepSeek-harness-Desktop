@@ -18,6 +18,7 @@ const { NpmRegistryUpdateSource } = require('../update/npm-registry-update-sourc
 const { NpmInstaller } = require('../update/npm-installer');
 const { verifyRuntime } = require('../update/runtime-verifier');
 const { DshUpdateManager, STATES: UPDATE_STATES } = require('../update/dsh-update-manager');
+const { UpdateDialog } = require('../window/update-dialog');
 const { mark, attach, dump } = require('../utils/boot-timeline');
 
 const DEFAULT_PORT = 3080;
@@ -59,6 +60,7 @@ class AppLifecycle {
     markImpl = mark,
     onOpenUpdateDialog,
     onShowUpdateMessage,
+    updateDialogFactory = (options) => new UpdateDialog(options),
   } = {}) {
     this.app = appImpl;
     this.shell = shellImpl;
@@ -99,6 +101,8 @@ class AppLifecycle {
     this.trayFactory = trayFactory;
     this.onOpenUpdateDialog = onOpenUpdateDialog;
     this.onShowUpdateMessage = onShowUpdateMessage;
+    this.updateDialogFactory = updateDialogFactory;
+    this.updateDialog = null;
     this.window = null;
     this.tray = null;
     this.currentRuntime = null;
@@ -347,8 +351,14 @@ class AppLifecycle {
     if (typeof this.onOpenUpdateDialog === 'function') {
       return this.onOpenUpdateDialog(snapshot);
     }
-    this.appLogger.info(`DSH update requested for ${snapshot && snapshot.latest && snapshot.latest.version || 'unknown'}`);
-    return null;
+    if (!this.updateDialog) {
+      this.updateDialog = this.updateDialogFactory({
+        updateManager: this.updateManager,
+        ownerWindow: this.window && this.window.win,
+        logger: this.appLogger,
+      });
+    }
+    return this.updateDialog.show(snapshot);
   }
 
   _showUpdateMessage(message) {
@@ -387,6 +397,7 @@ class AppLifecycle {
     }
     this.appLogger.info('--- boot timeline ---\n' + dump());
     if (this.tray) { this.tray.destroy(); this.tray = null; }
+    if (this.updateDialog) { this.updateDialog.destroy(); this.updateDialog = null; }
     if (this.window) { this.window.destroy(); this.window = null; }
     this.appLogger.info('quit complete');
     this.app.quit();

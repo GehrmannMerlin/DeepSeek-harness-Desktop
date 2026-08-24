@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DSH Runtime 更新</title>
+  <link rel="stylesheet" href="update.css">
+</head>
+<body>
+  <main class="dialog" aria-labelledby="title">
+    <header>
+      <p class="eyebrow">DeepSeek Harness Desktop</p>
+      <h1 id="title">DSH Runtime 更新</h1>
+      <p id="summary" class="summary">正在读取更新状态…</p>
+    </header>
+
+    <section class="versions" aria-label="版本信息">
+      <div><span>当前版本</span><strong id="current-version">—</strong></div>
+      <div><span>可用版本</span><strong id="available-version">—</strong></div>
+    </section>
+
+    <section class="notes-section">
+      <h2>发行说明</h2>
+      <p id="release-notes" class="notes">暂无发行说明。</p>
+    </section>
+
+    <p id="progress" class="progress" role="status">—</p>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <div class="actions">
+      <button id="confirm" class="primary" type="button">确认更新</button>
+      <button id="retry" type="button" hidden>重试</button>
+      <button id="cancel" type="button">取消</button>
+      <button id="open-log" class="link-button" type="button">打开更新日志</button>
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      'use strict';
+      var api = window.updateApi;
+      var currentVersion = document.getElementById('current-version');
+      var availableVersion = document.getElementById('available-version');
+      var releaseNotes = document.getElementById('release-notes');
+      var summary = document.getElementById('summary');
+      var progress = document.getElementById('progress');
+      var error = document.getElementById('error');
+      var confirm = document.getElementById('confirm');
+      var retry = document.getElementById('retry');
+      var cancel = document.getElementById('cancel');
+      var openLog = document.getElementById('open-log');
+      var phaseLabels = {
+        preparing: '准备更新…', installing: '正在安装…', verifying: '正在验证…',
+        'ready-to-apply': '更新已准备就绪。', stopping: '正在停止当前 Harness…',
+        switching: '正在切换 Runtime…', restarting: '正在重启 Harness…',
+        checking: '正在检查更新…', 'restoring-current': '正在恢复当前 Runtime…',
+        'rolling-back': '正在回滚 Runtime…', 'restarting-current': '正在重启当前 Runtime…',
+      };
+
+      function showError(message) {
+        error.textContent = message || '更新失败，请重试。';
+        error.hidden = false;
+        retry.hidden = false;
+      }
+
+      function render(payload) {
+        var state = payload && payload.snapshot ? payload.snapshot : payload || {};
+        var latest = state.latest || state.preparedRuntime || {};
+        var current = state.currentRuntime || {};
+        currentVersion.textContent = current.version || '未知';
+        availableVersion.textContent = latest.version || '—';
+        releaseNotes.textContent = latest.releaseNotes || latest.notes || '暂无发行说明。';
+        if (payload && payload.progress) progress.textContent = phaseLabels[payload.progress.phase] || payload.progress.phase || '处理中…';
+        else if (state.progress) progress.textContent = phaseLabels[state.progress.phase] || state.progress.phase || '处理中…';
+        else progress.textContent = state.state || '—';
+        if (state.error && state.error.message) showError(state.error.message);
+        else if (!state.error && state.state !== 'FAILED') { error.hidden = true; retry.hidden = true; }
+        summary.textContent = state.updateAvailable ? '发现新的 DSH Runtime，可确认安装。' : (state.state || '');
+        var busy = ['PREPARING', 'INSTALLING', 'VERIFYING', 'STOPPING_CURRENT', 'SWITCHING', 'RESTARTING', 'ROLLING_BACK'].indexOf(state.state) !== -1;
+        confirm.disabled = busy;
+        cancel.disabled = busy;
+      }
+
+      function invoke(action) {
+        action().then(render).catch(function (reason) { showError(reason && reason.message); });
+      }
+
+      confirm.addEventListener('click', function () { invoke(api.confirmUpdate); });
+      retry.addEventListener('click', function () { invoke(api.confirmUpdate); });
+      cancel.addEventListener('click', function () { invoke(api.cancelUpdate); });
+      openLog.addEventListener('click', function () { api.openUpdateLog().catch(function (reason) { showError(reason && reason.message); }); });
+      api.onStateChange(render);
+      api.getState().then(render).catch(function (reason) { showError(reason && reason.message); });
+    }());
+  </script>
+</body>
+</html>

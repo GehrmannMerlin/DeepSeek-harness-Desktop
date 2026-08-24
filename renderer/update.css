@@ -1,0 +1,36 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  background: #0f1115;
+  color: #f4f7fb;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at top right, #233045 0, #141923 44%, #0f1115 100%);
+}
+
+.dialog { padding: 32px; }
+.eyebrow { color: #8ea6c9; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+h1 { margin: 6px 0 8px; font-size: 28px; }
+h2 { margin: 0 0 10px; font-size: 14px; color: #b9c5d7; }
+.summary { color: #aebbd0; margin: 0 0 26px; }
+.versions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 26px; }
+.versions div { padding: 14px; border: 1px solid #2e3b4e; border-radius: 12px; background: #171d28; }
+.versions span, .versions strong { display: block; }
+.versions span { color: #8e9bb0; font-size: 12px; margin-bottom: 6px; }
+.versions strong { font-size: 16px; }
+.notes-section { border-top: 1px solid #2e3b4e; padding-top: 20px; }
+.notes { min-height: 72px; white-space: pre-wrap; color: #cbd4e2; line-height: 1.55; }
+.progress { min-height: 22px; color: #77b9ff; }
+.error { padding: 10px 12px; border: 1px solid #a94c59; border-radius: 8px; color: #ffb7c0; background: #321b23; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+button { border: 1px solid #3a4960; border-radius: 8px; padding: 10px 16px; color: #eef4ff; background: #202a3a; cursor: pointer; }
+button:hover:not(:disabled) { background: #2b3a52; }
+button:disabled { cursor: default; opacity: .5; }
+button.primary { border-color: #5da7ff; background: #1766ad; }
+button.primary:hover:not(:disabled) { background: #217acb; }
+.link-button { margin-left: auto; border-color: transparent; background: transparent; color: #9fc7f5; }
