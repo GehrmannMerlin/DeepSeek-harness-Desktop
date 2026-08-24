@@ -43,6 +43,7 @@ async function createRuntimeFixture(directory, {
   previousVersion = null,
   bundledVersion = '0.8.0',
   includeBundled = true,
+  writeState = true,
   state = {},
   legacyResolver = () => ({ command: 'npx.cmd', args: ['@deepseek-ai/dsh', 'web'] }),
 } = {}) {
@@ -64,7 +65,7 @@ async function createRuntimeFixture(directory, {
   if (!Object.prototype.hasOwnProperty.call(state, 'current') && currentVersion && currentVersion !== 'bundled') {
     initialState.current = runtimeReference(currentVersion);
   }
-  await stateStore.save(initialState);
+  if (writeState) await stateStore.save(initialState);
 
   const runtimeManager = new DshRuntimeManager({
     stateStore,
@@ -260,6 +261,19 @@ test('startup selects valid managed runtime over bundled and falls back for corr
     const fallback = await corruptFixture.runtimeManager.resolveCurrentRuntime();
     assert.equal(fallback.kind, 'bundled');
     assert.equal(fallback.version, '0.8.0');
+
+    const missingFixture = await createRuntimeFixture(path.join(directory, 'missing'), {
+      currentVersion: CURRENT_VERSION,
+      bundledVersion: '0.8.0',
+      writeState: false,
+    });
+    const missingStateFallback = await missingFixture.runtimeManager.resolveCurrentRuntime();
+    assert.equal(missingStateFallback.kind, 'bundled');
+    assert.equal(missingStateFallback.version, '0.8.0');
+    await assert.rejects(
+      fs.access(path.join(missingFixture.runtimeRoot, 'state.json')),
+      { code: 'ENOENT' },
+    );
   });
 });
 
@@ -379,7 +393,7 @@ test('invalid staged runtime is rejected while the current runtime and pointer r
   });
 });
 
-test('pending activation clears only after health and activation both succeed', async () => {
+test('pending recovery keeps pending durable on health failure and activates only after health success', async () => {
   await withTempDir(async (directory) => {
     const fixture = await createRuntimeFixture(directory, {
       currentVersion: CURRENT_VERSION,
@@ -388,27 +402,41 @@ test('pending activation clears only after health and activation both succeed', 
       state: { pending: runtimeReference(LATEST_VERSION) },
     });
     await writeRuntime(path.join(fixture.runtimeRoot, 'versions', LATEST_VERSION), LATEST_VERSION);
-    const system = createSystem({ fixture, healthResults: [{ ok: true }, { ok: true }, { ok: true }] });
-    const originalActivate = fixture.runtimeManager.activateRuntime.bind(fixture.runtimeManager);
-    let failActivation = true;
-    fixture.runtimeManager.activateRuntime = async (runtime) => {
-      if (failActivation) {
-        failActivation = false;
-        throw new Error('activation write failed');
-      }
-      return originalActivate(runtime);
-    };
+    const failedHealthSystem = createSystem({ fixture, healthResults: [{ ok: false }, { ok: true }] });
 
-    const first = await system.manager.recoverPendingActivation();
-    assert.equal(first.state, STATES.ROLLED_BACK);
-    assert.equal(first.pending, true);
-    assert.equal((await fixture.runtimeManager.getState()).pending.version, LATEST_VERSION);
+    const failedHealth = await failedHealthSystem.manager.recoverPendingActivation();
+    const durableState = await fixture.runtimeManager.getState();
+    assert.equal(failedHealth.state, STATES.ROLLED_BACK);
+    assert.equal(failedHealth.pending, true);
+    assert.equal(durableState.pending.version, LATEST_VERSION);
+    assert.equal(failedHealthSystem.calls.some((entry) => Array.isArray(entry) && entry[0] === 'activate'), false);
+    assert.deepEqual(failedHealthSystem.calls.map((entry) => Array.isArray(entry) ? entry[0] : entry), [
+      'stop', 'start', 'health', 'stop', 'start', 'health',
+    ]);
+  });
 
-    const second = await system.manager.recoverPendingActivation();
-    assert.equal(second.state, STATES.SUCCESS);
-    assert.equal(second.pending, false);
-    assert.equal((await fixture.runtimeManager.getState()).pending, null);
-    assert.equal((await fixture.runtimeManager.getState()).current.version, LATEST_VERSION);
+  await withTempDir(async (directory) => {
+    const fixture = await createRuntimeFixture(directory, {
+      currentVersion: CURRENT_VERSION,
+      previousVersion: null,
+      bundledVersion: '0.8.0',
+      state: { pending: runtimeReference(LATEST_VERSION) },
+    });
+    await writeRuntime(path.join(fixture.runtimeRoot, 'versions', LATEST_VERSION), LATEST_VERSION);
+    const system = createSystem({ fixture, healthResults: [{ ok: true }] });
+
+    const recovered = await system.manager.recoverPendingActivation();
+    const state = await fixture.runtimeManager.getState();
+    assert.equal(recovered.state, STATES.SUCCESS);
+    assert.equal(recovered.pending, false);
+    assert.equal(state.pending, null);
+    assert.equal(state.current.version, LATEST_VERSION);
+    assert.deepEqual(system.calls.map((entry) => Array.isArray(entry) ? entry[0] : entry), [
+      'stop', 'start', 'health', 'activate',
+    ]);
+    const callNames = system.calls.map((entry) => Array.isArray(entry) ? entry[0] : entry);
+    assert.equal(callNames.indexOf('start') < callNames.indexOf('health'), true);
+    assert.equal(callNames.indexOf('health') < callNames.indexOf('activate'), true);
   });
 });
 
