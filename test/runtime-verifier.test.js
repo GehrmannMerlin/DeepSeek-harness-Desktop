@@ -25,6 +25,23 @@ test('verifier accepts exact package and CLI version', async () => {
   });
 });
 
+test('verifier accepts a dsh bin entry alongside sibling commands', async () => {
+  await withTempDir(async (rootPath) => {
+    const { cliPath, packageJsonPath } = await createPackageTree(rootPath, { version: '1.2.3', cliRelativePath: 'lib/bin.js' });
+    await writeJson(packageJsonPath, { name: '@deepseek-ai/dsh', version: '1.2.3', bin: { dsh: 'lib/bin.js', helper: 'lib/helper.js' } });
+    const result = await verifyRuntime({
+      rootPath,
+      expectedVersion: '1.2.3',
+      nodeCommand: 'node',
+      runCommand: async (_command, args) => {
+        assert.deepEqual(args, [cliPath, '--version']);
+        return { code: 0, stdout: 'dsh 1.2.3\n', stderr: '' };
+      },
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
 test('verifier rejects package name/version/bin mismatch', async () => {
   await withTempDir(async (rootPath) => {
     const { packageJsonPath } = await createPackageTree(rootPath, { version: '1.2.3' });
@@ -37,7 +54,11 @@ test('verifier rejects package name/version/bin mismatch', async () => {
     result = await verifyRuntime({ rootPath, expectedVersion: '1.2.3', nodeCommand: 'node', runCommand: async () => ({ code: 0, stdout: '1.2.3' }) });
     assert.equal(result.reason, 'package-version-mismatch');
 
-    await writeJson(packageJsonPath, { name: '@deepseek-ai/dsh', version: '1.2.3', bin: { dsh: 'one.js', other: 'two.js' } });
+    await writeJson(packageJsonPath, { name: '@deepseek-ai/dsh', version: '1.2.3', bin: { helper: 'two.js' } });
+    result = await verifyRuntime({ rootPath, expectedVersion: '1.2.3', nodeCommand: 'node', runCommand: async () => ({ code: 0, stdout: '1.2.3' }) });
+    assert.equal(result.reason, 'invalid-bin');
+
+    await writeJson(packageJsonPath, { name: '@deepseek-ai/dsh', version: '1.2.3', bin: { dsh: '' } });
     result = await verifyRuntime({ rootPath, expectedVersion: '1.2.3', nodeCommand: 'node', runCommand: async () => ({ code: 0, stdout: '1.2.3' }) });
     assert.equal(result.reason, 'invalid-bin');
   });

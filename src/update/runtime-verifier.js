@@ -23,7 +23,7 @@ function result({ ok = false, packagePath, cliEntry = null, reportedVersion = nu
 function resolveCliEntry(packageRoot, bin) {
   let entry;
   if (typeof bin === 'string') entry = bin;
-  else if (bin && typeof bin === 'object' && !Array.isArray(bin) && Object.keys(bin).length === 1 && typeof bin.dsh === 'string') entry = bin.dsh;
+  else if (bin && typeof bin === 'object' && !Array.isArray(bin) && typeof bin.dsh === 'string') entry = bin.dsh;
   else return null;
   if (!entry || path.isAbsolute(entry)) return null;
   const cliEntry = path.resolve(packageRoot, entry);
