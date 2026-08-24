@@ -143,8 +143,10 @@ if that remains necessary.
 - [ ] Real Managed update, restart persistence, rollback, external ownership, and pending activation PASS — not executable without a real runtime
 - [ ] Standard `npm run pack` and `npm run dist` PASS — intentionally not run against a missing real runtime
 - [ ] Real NSIS install, installed launch/update, and process cleanup PASS — not executable without a real runtime
-- [x] Existing deterministic tests previously passed at `107 passed`, `0 failed`; a fresh final regression is still required
-- [ ] `git diff --check` — final check pending
+- [x] Deterministic regression suite: `npm test` — `107 passed`, `0 failed`, exit 0
+- [x] `git diff --check` — exit 0
+- [x] Branch/worktree final check — `codex/dsh-runtime-updater`, clean after documentation commit
+- [x] Diagnostic process cleanup — no baseline node/npm PID remained; reused PID 28700 was `WmiPrvSE`, not a diagnostic process
 
 ## Gate decision
 
