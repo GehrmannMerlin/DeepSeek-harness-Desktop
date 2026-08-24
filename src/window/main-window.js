@@ -1,12 +1,14 @@
 'use strict';
+const { EventEmitter } = require('node:events');
 const { BrowserWindow, shell } = require('electron');
 const { renderer } = require('../utils/paths');
 const { mark } = require('../utils/boot-timeline');
 
 // Owns the single BrowserWindow: secure webPreferences, hide-on-close, and the
 // starting/error/harness page transitions. Never spawns or kills the harness.
-class MainWindow {
+class MainWindow extends EventEmitter {
   constructor({ iconPath }) {
+    super();
     this.harnessUrl = null;
     this._allowClose = false;
     this._page = 'none'; // 'starting' | 'harness' | 'error'
@@ -112,6 +114,7 @@ class MainWindow {
     wc.on('dom-ready', () => mark(`${prefix()}_dom_ready`, this._windowState()));
     wc.on('did-finish-load', () => {
       mark(`${prefix()}_did_finish_load`, this._windowState());
+      if (this._page === 'harness') this.emit('harness-ready');
       if (this._page === 'starting') setTimeout(() => this._verifyPaint(), 600);
     });
     wc.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL) => {
