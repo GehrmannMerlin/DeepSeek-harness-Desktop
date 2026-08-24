@@ -7,6 +7,7 @@ const { getLogsDir, renderer } = require('../utils/paths');
 const CHANNELS = Object.freeze({
   getState: 'dsh-update:get-state',
   confirm: 'dsh-update:confirm',
+  retry: 'dsh-update:retry',
   cancel: 'dsh-update:cancel',
   openLog: 'dsh-update:open-log',
   state: 'dsh-update:state',
@@ -48,6 +49,7 @@ class UpdateDialog {
     this.allowClose = false;
     this.handlersRegistered = false;
     this.listeners = [];
+    this.retryPromise = null;
   }
 
   show(snapshot = this.updateManager.getSnapshot()) {
@@ -138,6 +140,7 @@ class UpdateDialog {
     if (this.handlersRegistered || !this.ipcMain || typeof this.ipcMain.handle !== 'function') return;
     this._handle(CHANNELS.getState, () => this.updateManager.getSnapshot());
     this._handle(CHANNELS.confirm, () => this.updateManager.confirmUpdate());
+    this._handle(CHANNELS.retry, () => this._retryUpdate());
     this._handle(CHANNELS.cancel, () => this.updateManager.cancelUpdate());
     this._handle(CHANNELS.openLog, () => this._openConfiguredLog());
     this.handlersRegistered = true;
@@ -152,7 +155,7 @@ class UpdateDialog {
 
   _removeIpcHandlers() {
     if (!this.handlersRegistered || !this.ipcMain || typeof this.ipcMain.removeHandler !== 'function') return;
-    for (const channel of [CHANNELS.getState, CHANNELS.confirm, CHANNELS.cancel, CHANNELS.openLog]) {
+    for (const channel of [CHANNELS.getState, CHANNELS.confirm, CHANNELS.retry, CHANNELS.cancel, CHANNELS.openLog]) {
       this.ipcMain.removeHandler(channel);
     }
     this.handlersRegistered = false;
@@ -172,6 +175,21 @@ class UpdateDialog {
   async _openConfiguredLog() {
     if (!this.shell || typeof this.shell.openPath !== 'function') return '';
     return this.shell.openPath(this.logPath);
+  }
+
+  _retryUpdate() {
+    if (this.retryPromise) return this.retryPromise;
+    const operation = Promise.resolve()
+      .then(() => this.updateManager.checkForUpdates({ manual: true }))
+      .then((snapshot) => {
+        if (!snapshot || snapshot.state !== 'UPDATE_AVAILABLE') return snapshot;
+        return this.updateManager.confirmUpdate();
+      });
+    const settled = operation.finally(() => {
+      if (this.retryPromise === settled) this.retryPromise = null;
+    });
+    this.retryPromise = settled;
+    return settled;
   }
 
   _sendState(payload) {

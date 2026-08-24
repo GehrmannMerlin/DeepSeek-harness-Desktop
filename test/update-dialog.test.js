@@ -58,7 +58,7 @@ function makeUpdateManager(snapshot = {}) {
     error: null,
     ...snapshot,
   };
-  manager.calls = { confirm: 0, cancel: 0 };
+  manager.calls = { check: 0, confirm: 0, cancel: 0 };
   manager.getSnapshot = () => JSON.parse(JSON.stringify(manager.snapshot));
   manager.operation = null;
   manager.confirmUpdate = () => {
@@ -72,6 +72,13 @@ function makeUpdateManager(snapshot = {}) {
     manager.calls.cancel += 1;
     manager.operation = Promise.resolve(manager.getSnapshot()).finally(() => { manager.operation = null; });
     return manager.operation;
+  };
+  manager.checkForUpdates = async () => {
+    manager.calls.check += 1;
+    manager.snapshot.state = 'UPDATE_AVAILABLE';
+    manager.snapshot.error = null;
+    manager.snapshot.updateAvailable = true;
+    return manager.getSnapshot();
   };
   return manager;
 }
@@ -149,7 +156,7 @@ test('preload exposes only the explicit update API', () => {
   }
   assert.deepEqual(Object.keys(exposed), ['updateApi']);
   assert.deepEqual(Object.keys(exposed.updateApi).sort(), [
-    'cancelUpdate', 'confirmUpdate', 'getState', 'onStateChange', 'openUpdateLog',
+    'cancelUpdate', 'confirmUpdate', 'getState', 'onStateChange', 'openUpdateLog', 'retryUpdate',
   ]);
   assert.equal(typeof preload.createUpdateApi, 'function');
   assert.equal(Object.prototype.hasOwnProperty.call(exposed.updateApi, 'ipcRenderer'), false);
@@ -183,10 +190,44 @@ test('confirm and cancel IPC calls remain manager-deduplicated', async () => {
   dialog.destroy();
 });
 
+test('FAILED retry performs one manual check and one new update operation for duplicate clicks', async () => {
+  const { dialog, manager, ipcMain } = makeDialog({
+    updateManager: makeUpdateManager({
+      state: 'FAILED',
+      updateAvailable: false,
+      error: { message: 'previous install failed' },
+    }),
+  });
+  let releaseCheck;
+  const retryManager = dialog.updateManager;
+  retryManager.checkForUpdates = ({ manual }) => {
+    assert.equal(manual, true);
+    retryManager.calls.check += 1;
+    return new Promise((resolve) => {
+      releaseCheck = () => {
+        retryManager.snapshot.state = 'UPDATE_AVAILABLE';
+        retryManager.snapshot.error = null;
+        retryManager.snapshot.updateAvailable = true;
+        resolve(retryManager.getSnapshot());
+      };
+    });
+  };
+  dialog.show();
+  const sender = dialog.window.webContents;
+  const first = ipcMain.handlers.get('dsh-update:retry')({ sender });
+  const second = ipcMain.handlers.get('dsh-update:retry')({ sender });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(retryManager.calls.check, 1);
+  releaseCheck();
+  await Promise.all([first, second]);
+  assert.equal(retryManager.calls.confirm, 1);
+  dialog.destroy();
+});
+
 test('opening the dialog does not start installation', () => {
   const { dialog, manager } = makeDialog();
   dialog.show();
-  assert.deepEqual(manager.calls, { confirm: 0, cancel: 0 });
+  assert.deepEqual(manager.calls, { check: 0, confirm: 0, cancel: 0 });
   dialog.destroy();
 });
 

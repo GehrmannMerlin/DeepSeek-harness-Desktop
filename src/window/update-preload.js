@@ -5,6 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CHANNELS = Object.freeze({
   getState: 'dsh-update:get-state',
   confirm: 'dsh-update:confirm',
+  retry: 'dsh-update:retry',
   cancel: 'dsh-update:cancel',
   openLog: 'dsh-update:open-log',
   state: 'dsh-update:state',
@@ -14,6 +15,7 @@ function createUpdateApi({ contextBridgeImpl = contextBridge, ipcRendererImpl = 
   const api = Object.freeze({
     getState: () => ipcRendererImpl.invoke(CHANNELS.getState),
     confirmUpdate: () => ipcRendererImpl.invoke(CHANNELS.confirm),
+    retryUpdate: () => ipcRendererImpl.invoke(CHANNELS.retry),
     cancelUpdate: () => ipcRendererImpl.invoke(CHANNELS.cancel),
     openUpdateLog: () => ipcRendererImpl.invoke(CHANNELS.openLog),
     onStateChange: (callback) => {

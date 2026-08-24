@@ -86,7 +86,7 @@
       }
 
       confirm.addEventListener('click', function () { invoke(api.confirmUpdate); });
-      retry.addEventListener('click', function () { invoke(api.confirmUpdate); });
+      retry.addEventListener('click', function () { invoke(api.retryUpdate); });
       cancel.addEventListener('click', function () { invoke(api.cancelUpdate); });
       openLog.addEventListener('click', function () { api.openUpdateLog().catch(function (reason) { showError(reason && reason.message); }); });
       api.onStateChange(render);
