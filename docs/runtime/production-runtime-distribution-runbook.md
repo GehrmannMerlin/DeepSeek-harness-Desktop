@@ -46,7 +46,7 @@ Record these values from the workflow summary, Factory log, and candidate Releas
 
 ```text
 RUNTIME_VERSION=<exact SemVer>
-SOURCE_TAG=dsh-<VERSION>
+SOURCE_TAG=dsh-v<VERSION>
 SOURCE_COMMIT=<40-hex upstream commit>
 NODE_VERSION=24.18.0
 PNPM_VERSION=11.7.0
