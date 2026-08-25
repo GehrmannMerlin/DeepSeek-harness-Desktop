@@ -34,7 +34,9 @@ test('Windows runtime factory resolves latest before checkout and uses the exact
   const text = workflowText();
   const checkout = text.indexOf('actions/checkout@');
   const latest = text.indexOf('npm view @deepseek-ai/dsh dist-tags.latest');
+  const setupNode = text.indexOf('uses: actions/setup-node@');
   assert.ok(latest >= 0, 'workflow must use npm dist-tags.latest for automatic resolution');
+  assert.ok(setupNode >= 0 && setupNode < latest, 'setup-node must precede npm latest resolution');
   assert.ok(latest < checkout, 'latest detection must precede checkout');
   assert.match(text, /deepseek-ai\/deepseek-harness/);
   assert.match(text, /ref:\s*dsh-v\$\{\{\s*env\.RUNTIME_VERSION\s*\}\}/);
@@ -66,6 +68,60 @@ test('Windows runtime factory invokes existing factory and CLI paths with immuta
   assert.match(text, /Health/);
   assert.match(text, /Native/);
   assert.match(text, /actions\/upload-artifact@/);
+});
+
+test('candidate Release publication is serialized, explicit, idempotent, and conflict-safe', () => {
+  const text = workflowText();
+  assert.match(text, /concurrency:\s*\n\s*group:.*github\.repository.*(?:inputs\.version|latest)/s);
+  assert.match(text, /cancel-in-progress:\s*false/);
+  assert.match(text, /gh api .*releases\/tags/);
+  assert.match(text, /releaseJson.*(?:LASTEXITCODE|releaseExists)|release.*(?:absent|not found)/is);
+  assert.match(text, /gh release create/);
+  assert.match(text, /gh release upload/);
+  assert.match(text, /missing.*asset|asset.*missing/i);
+  assert.match(text, /conflict|mismatch/i);
+  assert.match(text, /draft.*false|prerelease.*true|prerelease.*false/i);
+  assert.match(text, /schemaVersion.*1/);
+  assert.match(text, /win32.*x64|x64.*win32/s);
+  assert.match(text, /https?:.*artifactUrl|artifactUrl.*https?/s);
+  assert.match(text, /Get-FileHash/);
+  assert.match(text, /contentLength|sizeBytes|Length/);
+  assert.match(text, /SOURCE_TAG|SOURCE_COMMIT|sourceRevision/);
+  assert.doesNotMatch(text, /gh release upload[^\n]*--clobber/);
+  assert.match(text, /(?:after create|after upload|verify).*assets|assets.*(?:after create|after upload|verify)/is);
+  assert.doesNotMatch(text, /gh release create[^\n]*(?:\.zip|runtime-index\.json)/i);
+});
+
+test('factory summary derives phase status and gates promotion readiness on complete success', () => {
+  const text = workflowText();
+  assert.match(text, /id:\s*(?:factory|publish|remote|verify)/);
+  assert.match(text, /FACTORY_STATUS|factory.*status/i);
+  assert.match(text, /PUBLISH_STATUS|publish.*status/i);
+  assert.match(text, /REMOTE_VERIFY|remote.*status/i);
+  assert.match(text, /CLI_STATUS|WEB_STATUS|HEALTH_STATUS|NATIVE_STATUS/i);
+  assert.match(text, /failed phase|failed.*phase|CURRENT_PHASE/i);
+  assert.match(text, /if \(.*(?:allSucceeded|completeSuccess|WAITING_FOR_PROMOTION).*\)/is);
+  assert.match(text, /WAITING_FOR_PROMOTION/);
+  assert.doesNotMatch(text, /- CLI: passed/);
+  assert.doesNotMatch(text, /- Web: passed/);
+  assert.doesNotMatch(text, /- Health: passed/);
+  assert.doesNotMatch(text, /- Native: passed/);
+  assert.match(text, /if \(.*(?:allSucceeded|completeSuccess).*\)[\s\S]*factory-metadata\.json/is);
+  assert.match(text, /failure|FAILED|not ready/i);
+});
+
+test('existing candidate preflight validates both assets and identity before no-op', () => {
+  const text = workflowText();
+  assert.match(text, /(?:assetName|zipName)/);
+  assert.match(text, /runtime-index\.json/);
+  assert.match(text, /Invoke-WebRequest|browser_download_url/);
+  assert.match(text, /ConvertFrom-Json/);
+  assert.match(text, /packageName|schemaVersion/);
+  assert.match(text, /artifactUrl/);
+  assert.match(text, /source.*(?:tag|commit)|(?:tag|commit).*source/i);
+  assert.match(text, /skip=true/);
+  assert.match(text, /asset.*(?:hash|size)|(?:hash|size).*asset/i);
+  assert.doesNotMatch(text, /asset\.Count -eq 1[\s\S]{0,250}skip=true/);
 });
 
 test('Windows runtime factory has no stable-index mutation or recursive workflow trigger', () => {

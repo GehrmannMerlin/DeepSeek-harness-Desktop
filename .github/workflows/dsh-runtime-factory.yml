@@ -13,6 +13,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: dsh-runtime-factory-${{ github.repository }}-${{ inputs.version || 'latest' }}
+  cancel-in-progress: false
+
 env:
   RUNTIME_PLATFORM: win32
   RUNTIME_ARCH: x64
@@ -23,7 +27,12 @@ jobs:
   factory:
     runs-on: windows-latest
     steps:
-      - name: Resolve latest version and candidate state
+      - name: Set up Node.js before registry resolution
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Resolve version and validate existing candidate preflight
         id: resolve
         shell: pwsh
         env:
@@ -31,41 +40,74 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=resolve" >> $env:GITHUB_ENV
+          "FACTORY_STATUS=not_run" >> $env:GITHUB_ENV
+          "PUBLISH_STATUS=not_run" >> $env:GITHUB_ENV
+          "REMOTE_VERIFY_STATUS=not_run" >> $env:GITHUB_ENV
+          "CLI_STATUS=not_run" >> $env:GITHUB_ENV
+          "WEB_STATUS=not_run" >> $env:GITHUB_ENV
+          "HEALTH_STATUS=not_run" >> $env:GITHUB_ENV
+          "NATIVE_STATUS=not_run" >> $env:GITHUB_ENV
           $version = $env:MANUAL_VERSION
-          if ([string]::IsNullOrWhiteSpace($version)) {
-            $version = (npm view @deepseek-ai/dsh dist-tags.latest).Trim()
-          }
-          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
-            throw "Resolved version is not an exact SemVer: $version"
-          }
+          if ([string]::IsNullOrWhiteSpace($version)) { $version = (npm view @deepseek-ai/dsh dist-tags.latest).Trim() }
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw "Resolved version is not an exact SemVer: $version" }
           "RUNTIME_VERSION=$version" >> $env:GITHUB_ENV
           "version=$version" >> $env:GITHUB_OUTPUT
-
           $tag = "dsh-runtime-v$version"
-          $assetName = "dsh-runtime-$version-win32-x64.zip"
-          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>$null
-          if ($LASTEXITCODE -eq 0 -and $releaseJson) {
+          $zipName = "dsh-runtime-$version-win32-x64.zip"
+          $indexName = 'runtime-index.json'
+          $expectedUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$zipName"
+          $releaseError = ''
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $releaseError = [string]$releaseJson
+            if ($releaseError -notmatch '404|Not Found') { throw "Unable to read candidate Release: $releaseError" }
+            $releaseJson = $null
+          }
+          if ($releaseJson) {
             $release = $releaseJson | ConvertFrom-Json
-            $asset = @($release.assets | Where-Object { $_.name -eq $assetName })
-            if ($asset.Count -eq 1 -and $asset[0].state -eq 'uploaded') {
+            if ($release.tag_name -ne $tag) { throw "Release tag mismatch: $($release.tag_name)" }
+            if ($release.draft -ne $false -or $release.prerelease -ne $true) { throw "Existing Release is not an immutable prerelease candidate: $tag" }
+            "RELEASE_PRESENT=true" >> $env:GITHUB_ENV
+            $zipAsset = @($release.assets | Where-Object { $_.name -eq $zipName })
+            $indexAsset = @($release.assets | Where-Object { $_.name -eq $indexName })
+            if ($zipAsset.Count -gt 1 -or $indexAsset.Count -gt 1) { throw 'Release contains duplicate expected assets' }
+            if ($zipAsset.Count -eq 1 -and $indexAsset.Count -eq 1) {
+              $preflight = Join-Path $env:RUNNER_TEMP "dsh-preflight-$version"
+              New-Item -ItemType Directory -Force $preflight | Out-Null
+              $remoteZip = Join-Path $preflight $zipName
+              $remoteIndex = Join-Path $preflight $indexName
+              Invoke-WebRequest -Uri $zipAsset[0].browser_download_url -OutFile $remoteZip
+              Invoke-WebRequest -Uri $indexAsset[0].browser_download_url -OutFile $remoteIndex
+              $index = Get-Content $remoteIndex -Raw | ConvertFrom-Json
+              if ($index.schemaVersion -ne 1 -or @($index.artifacts).Count -ne 1) { throw 'Existing runtime-index.json is not schema v1 with one artifact' }
+              $entry = $index.artifacts[0]
+              if ($entry.version -ne $version -or $entry.platform -ne 'win32' -or $entry.arch -ne 'x64') { throw 'Existing candidate identity does not match version/target' }
+              if ($entry.artifactUrl -ne $expectedUrl -or $entry.artifactUrl -notmatch '^https://') { throw 'Existing candidate artifact URL is not the expected HTTPS URL' }
+              if ($entry.sha256 -notmatch '^[a-f0-9]{64}$' -or $entry.sizeBytes -le 0) { throw 'Existing candidate hash or size is invalid' }
+              $zipHash = (Get-FileHash $remoteZip -Algorithm SHA256).Hash.ToLowerInvariant()
+              $zipSize = (Get-Item $remoteZip).Length
+              if ($zipHash -ne $entry.sha256 -or $zipSize -ne $entry.sizeBytes) { throw 'Existing candidate ZIP identity conflicts with runtime-index.json' }
+              if ($release.body -notmatch "SOURCE_TAG=dsh-v$version" -or $release.body -notmatch 'SOURCE_COMMIT=[0-9a-f]{40}') { throw 'Existing candidate source/tag identity is stale or missing' }
+              "VALIDATED_NOOP=true" >> $env:GITHUB_ENV
+              "CANDIDATE_STATUS=VALIDATED_CANDIDATE_NOOP" >> $env:GITHUB_ENV
               "skip=true" >> $env:GITHUB_OUTPUT
-              "RELEASE_STATUS=ACCEPTED_CANDIDATE_OR_STABLE" >> $env:GITHUB_ENV
-              "The immutable candidate or stable release already exists for $version; no build or publish is required." >> $env:GITHUB_STEP_SUMMARY
+              "RELEASE_STATUS=VALIDATED_CANDIDATE" >> $env:GITHUB_ENV
+              "REMOTE_VERIFY_STATUS=passed" >> $env:GITHUB_ENV
+              "PUBLISH_STATUS=passed" >> $env:GITHUB_ENV
+              "resolve_status=passed" >> $env:GITHUB_OUTPUT
               exit 0
             }
+            "skip=false" >> $env:GITHUB_OUTPUT
+          } else {
+            "RELEASE_PRESENT=false" >> $env:GITHUB_ENV
+            "skip=false" >> $env:GITHUB_OUTPUT
           }
-          "skip=false" >> $env:GITHUB_OUTPUT
-          "RELEASE_STATUS=NOT_PUBLISHED" >> $env:GITHUB_ENV
+          "resolve_status=passed" >> $env:GITHUB_OUTPUT
 
       - name: Checkout Desktop workflow repository
         if: steps.resolve.outputs.skip != 'true'
         uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        if: steps.resolve.outputs.skip != 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
 
       - name: Set up pnpm
         if: steps.resolve.outputs.skip != 'true'
@@ -88,6 +130,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=upstream-build" >> $env:GITHUB_ENV
           corepack prepare pnpm@11.7.0 --activate
           pnpm install --frozen-lockfile
           pnpm run build
@@ -98,108 +141,164 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $required = @('upstream/apps/cli', 'upstream/apps/web/dist', 'upstream/apps/web/package.json')
-          foreach ($path in $required) {
-            if (-not (Test-Path $path)) { throw "Required upstream path is missing: $path" }
-          }
+          foreach ($path in $required) { if (-not (Test-Path $path)) { throw "Required upstream path is missing: $path" } }
           $package = Get-Content 'upstream/apps/cli/package.json' -Raw | ConvertFrom-Json
-          if ($package.version -ne $env:RUNTIME_VERSION) {
-            throw "Upstream CLI package version mismatch: expected $env:RUNTIME_VERSION, received $($package.version)"
-          }
           $webPackage = Get-Content 'upstream/apps/web/package.json' -Raw | ConvertFrom-Json
-          if ($webPackage.version -ne $env:RUNTIME_VERSION) {
-            throw "Upstream Web package version mismatch: expected $env:RUNTIME_VERSION, received $($webPackage.version)"
-          }
+          if ($package.version -ne $env:RUNTIME_VERSION -or $webPackage.version -ne $env:RUNTIME_VERSION) { throw 'Upstream package version mismatch' }
           "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" >> $env:GITHUB_ENV
-          $commit = git -C upstream rev-parse HEAD
-          "SOURCE_COMMIT=$commit" >> $env:GITHUB_ENV
+          "SOURCE_COMMIT=$(git -C upstream rev-parse HEAD)" >> $env:GITHUB_ENV
 
-      - name: Validate distribution workflow and detect local candidate state
+      - name: Validate distribution workflow
         if: steps.resolve.outputs.skip != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=workflow-validation" >> $env:GITHUB_ENV
           node scripts/runtime-distribution/runtime-distribution-cli.js validate-workflows
 
       - name: Build verified Windows x64 runtime artifact
+        id: factory
         if: steps.resolve.outputs.skip != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=factory" >> $env:GITHUB_ENV
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $url = "https://github.com/${{ github.repository }}/releases/download/dsh-runtime-v$env:RUNTIME_VERSION/dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
-          node scripts/build-verified-runtime-artifact.js `
-            --source-runtime upstream/apps/cli `
-            --frontend-dist upstream/apps/web/dist `
-            --frontend-package-json upstream/apps/web/package.json `
-            --output artifacts `
-            --version $env:RUNTIME_VERSION `
-            --platform $env:RUNTIME_PLATFORM `
-            --arch $env:RUNTIME_ARCH `
-            --artifact-url $url `
-            --source-revision $env:SOURCE_COMMIT `
-            --pnpm-version $env:PNPM_VERSION | Tee-Object artifacts/factory.log
+          $resultText = node scripts/build-verified-runtime-artifact.js --source-runtime upstream/apps/cli --frontend-dist upstream/apps/web/dist --frontend-package-json upstream/apps/web/package.json --output artifacts --version $env:RUNTIME_VERSION --platform $env:RUNTIME_PLATFORM --arch $env:RUNTIME_ARCH --artifact-url $url --source-revision $env:SOURCE_COMMIT --pnpm-version $env:PNPM_VERSION 2>&1 | Tee-Object artifacts/factory.log | Out-String
+          if ($LASTEXITCODE -ne 0) { throw 'Verified runtime Factory failed' }
+          $result = $resultText | ConvertFrom-Json
+          "FACTORY_STATUS=passed" >> $env:GITHUB_ENV
+          "CLI_STATUS=passed" >> $env:GITHUB_ENV
+          "WEB_STATUS=passed" >> $env:GITHUB_ENV
+          "HEALTH_STATUS=passed" >> $env:GITHUB_ENV
+          "NATIVE_STATUS=passed" >> $env:GITHUB_ENV
+          "ARTIFACT_VERSION=$($result.indexEntry.version)" >> $env:GITHUB_ENV
+          "ARTIFACT_SHA256=$($result.indexEntry.sha256)" >> $env:GITHUB_ENV
+          "ARTIFACT_SIZE=$($result.indexEntry.sizeBytes)" >> $env:GITHUB_ENV
+          "factory_status=passed" >> $env:GITHUB_OUTPUT
 
-      - name: Publish immutable candidate Release assets
+      - name: Publish or reconcile immutable candidate Release assets
+        id: publish
         if: steps.resolve.outputs.skip != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=publish" >> $env:GITHUB_ENV
           $tag = "dsh-runtime-v$env:RUNTIME_VERSION"
           $zip = "artifacts/dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
           $index = 'artifacts/runtime-index.json'
-          gh release create $tag $zip $index --repo $env:GITHUB_REPOSITORY --title "DSH runtime $env:RUNTIME_VERSION" --notes "CANDIDATE_PUBLISHED; WAITING_FOR_PROMOTION" --prerelease
+          $expectedUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
+          $indexValue = Get-Content $index -Raw | ConvertFrom-Json
+          if ($indexValue.schemaVersion -ne 1 -or @($indexValue.artifacts).Count -ne 1) { throw 'Factory runtime-index.json is not schema v1 with one artifact' }
+          $entry = $indexValue.artifacts[0]
+          if ($entry.version -ne $env:RUNTIME_VERSION -or $entry.platform -ne 'win32' -or $entry.arch -ne 'x64' -or $entry.artifactUrl -ne $expectedUrl -or $entry.artifactUrl -notmatch '^https://') { throw 'Factory artifact metadata identity is invalid' }
+          $localHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $localSize = (Get-Item $zip).Length
+          if ($entry.sha256 -ne $localHash -or $entry.sizeBytes -ne $localSize) { throw 'Factory ZIP does not match runtime-index.json' }
+          $releaseError = ''
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $releaseError = [string]$releaseJson
+            if ($releaseError -notmatch '404|Not Found') { throw "Unable to read candidate Release: $releaseError" }
+            $releaseJson = $null
+          }
+          if (-not $releaseJson) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --title "DSH runtime $env:RUNTIME_VERSION" --notes "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION`nSOURCE_COMMIT=$env:SOURCE_COMMIT`nCANDIDATE_PUBLISHED" --prerelease
+            $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          }
+          $release = $releaseJson | ConvertFrom-Json
+          if ($release.tag_name -ne $tag -or $release.draft -ne $false -or $release.prerelease -ne $true) { throw 'Release state is stale, draft, or non-prerelease' }
+          if ($release.body -notmatch "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" -or $release.body -notmatch 'SOURCE_COMMIT=[0-9a-f]{40}') { throw 'Existing Release source/tag identity is stale or missing' }
+          foreach ($localPath in @($zip, $index)) {
+            $name = Split-Path $localPath -Leaf
+            $remote = @($release.assets | Where-Object { $_.name -eq $name })
+            if ($remote.Count -gt 1) { throw "Release contains duplicate asset: $name" }
+            if ($remote.Count -eq 1) {
+              $probe = Join-Path $env:RUNNER_TEMP "candidate-$name"
+              Invoke-WebRequest -Uri $remote[0].browser_download_url -OutFile $probe
+              $remoteHash = (Get-FileHash $probe -Algorithm SHA256).Hash.ToLowerInvariant()
+              $remoteSize = (Get-Item $probe).Length
+              if ($remoteHash -ne (Get-FileHash $localPath -Algorithm SHA256).Hash.ToLowerInvariant() -or $remoteSize -ne (Get-Item $localPath).Length) { throw "Immutable asset conflict: $name" }
+            } else { gh release upload $tag $localPath --repo $env:GITHUB_REPOSITORY }
+          }
+          $final = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          foreach ($name in @((Split-Path $zip -Leaf), $index)) {
+            $asset = @($final.assets | Where-Object { $_.name -eq $name })
+            if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded') { throw "Expected immutable asset is missing after publish: $name" }
+          }
+          "PUBLISH_STATUS=passed" >> $env:GITHUB_ENV
           "REMOTE_PUBLISH=CANDIDATE_PUBLISHED" >> $env:GITHUB_ENV
+          "publish_status=passed" >> $env:GITHUB_OUTPUT
 
-      - name: Verify remote candidate readback
+      - name: Verify remote candidate metadata and ZIP readback
+        id: remote
         if: steps.resolve.outputs.skip != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=remote-readback" >> $env:GITHUB_ENV
           $tag = "dsh-runtime-v$env:RUNTIME_VERSION"
-          $assetName = "dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
-          $release = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets | ConvertFrom-Json
-          $asset = @($release.assets | Where-Object { $_.name -eq $assetName })
-          if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded') { throw "Remote candidate asset readback failed" }
-          $remoteZip = Join-Path $env:RUNNER_TEMP $assetName
-          Invoke-WebRequest -Uri $asset[0].browser_download_url -OutFile $remoteZip
-          $local = Get-FileHash "artifacts/$assetName" -Algorithm SHA256
-          $remote = Get-FileHash $remoteZip -Algorithm SHA256
-          $localSize = (Get-Item "artifacts/$assetName").Length
-          $remoteSize = (Get-Item $remoteZip).Length
-          if ($local.Hash -ne $remote.Hash -or $localSize -ne $remoteSize) { throw 'Remote candidate hash/size mismatch' }
-          $index = Get-Content 'artifacts/runtime-index.json' -Raw | ConvertFrom-Json
+          $zipName = "dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          if ($release.tag_name -ne $tag -or $release.draft -ne $false -or $release.prerelease -ne $true) { throw 'Remote Release state is invalid' }
+          if ($release.body -notmatch "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" -or $release.body -notmatch 'SOURCE_COMMIT=[0-9a-f]{40}') { throw 'Remote source/tag identity is invalid' }
+          $root = Join-Path $env:RUNNER_TEMP "remote-$env:RUNTIME_VERSION"
+          New-Item -ItemType Directory -Force $root | Out-Null
+          $zipAsset = @($release.assets | Where-Object { $_.name -eq $zipName })
+          $indexAsset = @($release.assets | Where-Object { $_.name -eq 'runtime-index.json' })
+          if ($zipAsset.Count -ne 1 -or $indexAsset.Count -ne 1) { throw 'Remote readback is missing an expected asset' }
+          $remoteZip = Join-Path $root $zipName
+          $remoteIndex = Join-Path $root 'runtime-index.json'
+          Invoke-WebRequest -Uri $zipAsset[0].browser_download_url -OutFile $remoteZip
+          Invoke-WebRequest -Uri $indexAsset[0].browser_download_url -OutFile $remoteIndex
+          $index = Get-Content $remoteIndex -Raw | ConvertFrom-Json
           $entry = $index.artifacts[0]
-          "ARTIFACT_VERSION=$($entry.version)" >> $env:GITHUB_ENV
-          "ARTIFACT_SHA256=$($local.Hash.ToLowerInvariant())" >> $env:GITHUB_ENV
-          "ARTIFACT_SIZE=$localSize" >> $env:GITHUB_ENV
+          $expectedUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$zipName"
+          if ($index.schemaVersion -ne 1 -or @($index.artifacts).Count -ne 1 -or $entry.version -ne $env:RUNTIME_VERSION -or $entry.platform -ne 'win32' -or $entry.arch -ne 'x64' -or $entry.artifactUrl -ne $expectedUrl -or $entry.artifactUrl -notmatch '^https://') { throw 'Remote runtime-index identity is invalid' }
+          $hash = (Get-FileHash $remoteZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size = (Get-Item $remoteZip).Length
+          if ($hash -ne $entry.sha256 -or $size -ne $entry.sizeBytes) { throw 'Remote ZIP hash or size conflicts with runtime-index.json' }
+          "REMOTE_VERIFY_STATUS=passed" >> $env:GITHUB_ENV
           "REMOTE_VERIFY=REMOTE_VERIFIED" >> $env:GITHUB_ENV
+          "remote_status=passed" >> $env:GITHUB_OUTPUT
 
-      - name: Write factory summary and upload logs/metadata only
-        if: always() && steps.resolve.outputs.skip != 'true'
+      - name: Write failure-derived factory summary
+        if: always()
         shell: pwsh
         run: |
-          $summary = @"
-          ## DSH Runtime Factory
-          - Upstream version: $env:RUNTIME_VERSION
-          - Source tag/commit: $env:SOURCE_TAG / $env:SOURCE_COMMIT
-          - Artifact version/hash/size: $env:ARTIFACT_VERSION / $env:ARTIFACT_SHA256 / $env:ARTIFACT_SIZE
-          - CLI: passed
-          - Web: passed
-          - Health: passed
-          - Native: passed
-          - Remote publish: $env:REMOTE_PUBLISH
-          - Remote verify: $env:REMOTE_VERIFY
-          - Status: WAITING_FOR_PROMOTION
-          "@
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
-          @{ version=$env:RUNTIME_VERSION; sourceTag=$env:SOURCE_TAG; sourceCommit=$env:SOURCE_COMMIT; artifactVersion=$env:ARTIFACT_VERSION; sha256=$env:ARTIFACT_SHA256; sizeBytes=$env:ARTIFACT_SIZE; remotePublish=$env:REMOTE_PUBLISH; remoteVerify=$env:REMOTE_VERIFY; status='WAITING_FOR_PROMOTION' } | ConvertTo-Json | Set-Content artifacts/factory-metadata.json
+          $ErrorActionPreference = 'Continue'
+          $isNoop = $env:VALIDATED_NOOP -eq 'true'
+          $allSucceeded = $env:FACTORY_STATUS -eq 'passed' -and $env:PUBLISH_STATUS -eq 'passed' -and $env:REMOTE_VERIFY_STATUS -eq 'passed' -and $env:CLI_STATUS -eq 'passed' -and $env:WEB_STATUS -eq 'passed' -and $env:HEALTH_STATUS -eq 'passed' -and $env:NATIVE_STATUS -eq 'passed'
+          if ($isNoop) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## DSH Runtime Factory`n- Version: $env:RUNTIME_VERSION`n- Candidate: VALIDATED_CANDIDATE_NOOP`n- Remote verify: passed`n- Status: no-op; promotion state unchanged"
+          } elseif ($allSucceeded) {
+            $summary = @"
+            ## DSH Runtime Factory
+            - Upstream version: $env:RUNTIME_VERSION
+            - Source tag/commit: $env:SOURCE_TAG / $env:SOURCE_COMMIT
+            - Artifact version/hash/size: $env:ARTIFACT_VERSION / $env:ARTIFACT_SHA256 / $env:ARTIFACT_SIZE
+            - CLI: $env:CLI_STATUS
+            - Web: $env:WEB_STATUS
+            - Health: $env:HEALTH_STATUS
+            - Native: $env:NATIVE_STATUS
+            - Remote publish: $env:REMOTE_PUBLISH
+            - Remote verify: $env:REMOTE_VERIFY
+            - Status: WAITING_FOR_PROMOTION
+            "@
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+            @{ version=$env:RUNTIME_VERSION; sourceTag=$env:SOURCE_TAG; sourceCommit=$env:SOURCE_COMMIT; artifactVersion=$env:ARTIFACT_VERSION; sha256=$env:ARTIFACT_SHA256; sizeBytes=$env:ARTIFACT_SIZE; remotePublish=$env:REMOTE_PUBLISH; remoteVerify=$env:REMOTE_VERIFY; status='WAITING_FOR_PROMOTION' } | ConvertTo-Json | Set-Content artifacts/factory-metadata.json
+          } else {
+            $failedPhase = if ($env:CURRENT_PHASE) { $env:CURRENT_PHASE } else { 'unknown' }
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## DSH Runtime Factory FAILED`n- Failed phase: $failedPhase`n- Factory: $env:FACTORY_STATUS`n- Publish: $env:PUBLISH_STATUS`n- Remote verify: $env:REMOTE_VERIFY_STATUS`n- Promotion readiness: NOT_READY"
+          }
 
-      - name: Upload factory logs and metadata
-        if: always() && steps.resolve.outputs.skip != 'true'
+      - name: Upload factory logs and metadata only
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dsh-runtime-factory-${{ env.RUNTIME_VERSION }}
