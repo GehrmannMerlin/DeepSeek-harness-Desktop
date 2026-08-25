@@ -204,7 +204,7 @@ async function validateWorkflows({ root = process.cwd() } = {}) {
     if (error.code === 'ENOENT') return [];
     throw error;
   });
-  const workflows = entries.filter(entry => entry.isFile() && entry.name.endsWith(('.yml', '.yaml'))).map(entry => entry.name).sort();
+  const workflows = entries.filter(entry => entry.isFile() && (entry.name.endsWith('.yml') || entry.name.endsWith('.yaml'))).map(entry => entry.name).sort();
   return { valid: true, workflows };
 }
 

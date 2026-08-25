@@ -1,0 +1,209 @@
+name: DSH Runtime Factory
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional exact @deepseek-ai/dsh version to rebuild
+        required: false
+        type: string
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: write
+
+env:
+  RUNTIME_PLATFORM: win32
+  RUNTIME_ARCH: x64
+  NODE_VERSION: '24.18.0'
+  PNPM_VERSION: '11.7.0'
+
+jobs:
+  factory:
+    runs-on: windows-latest
+    steps:
+      - name: Resolve latest version and candidate state
+        id: resolve
+        shell: pwsh
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:MANUAL_VERSION
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = (npm view @deepseek-ai/dsh dist-tags.latest).Trim()
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+            throw "Resolved version is not an exact SemVer: $version"
+          }
+          "RUNTIME_VERSION=$version" >> $env:GITHUB_ENV
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+          $tag = "dsh-runtime-v$version"
+          $assetName = "dsh-runtime-$version-win32-x64.zip"
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>$null
+          if ($LASTEXITCODE -eq 0 -and $releaseJson) {
+            $release = $releaseJson | ConvertFrom-Json
+            $asset = @($release.assets | Where-Object { $_.name -eq $assetName })
+            if ($asset.Count -eq 1 -and $asset[0].state -eq 'uploaded') {
+              "skip=true" >> $env:GITHUB_OUTPUT
+              "RELEASE_STATUS=ACCEPTED_CANDIDATE_OR_STABLE" >> $env:GITHUB_ENV
+              "The immutable candidate or stable release already exists for $version; no build or publish is required." >> $env:GITHUB_STEP_SUMMARY
+              exit 0
+            }
+          }
+          "skip=false" >> $env:GITHUB_OUTPUT
+          "RELEASE_STATUS=NOT_PUBLISHED" >> $env:GITHUB_ENV
+
+      - name: Checkout Desktop workflow repository
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up pnpm
+        if: steps.resolve.outputs.skip != 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Checkout exact upstream source tag
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: dsh-v${{ env.RUNTIME_VERSION }}
+          path: upstream
+          fetch-depth: 1
+
+      - name: Build upstream CLI and Web assets
+        if: steps.resolve.outputs.skip != 'true'
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          corepack prepare pnpm@11.7.0 --activate
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Verify upstream layout and exact package version
+        if: steps.resolve.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @('upstream/apps/cli', 'upstream/apps/web/dist', 'upstream/apps/web/package.json')
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) { throw "Required upstream path is missing: $path" }
+          }
+          $package = Get-Content 'upstream/apps/cli/package.json' -Raw | ConvertFrom-Json
+          if ($package.version -ne $env:RUNTIME_VERSION) {
+            throw "Upstream CLI package version mismatch: expected $env:RUNTIME_VERSION, received $($package.version)"
+          }
+          $webPackage = Get-Content 'upstream/apps/web/package.json' -Raw | ConvertFrom-Json
+          if ($webPackage.version -ne $env:RUNTIME_VERSION) {
+            throw "Upstream Web package version mismatch: expected $env:RUNTIME_VERSION, received $($webPackage.version)"
+          }
+          "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" >> $env:GITHUB_ENV
+          $commit = git -C upstream rev-parse HEAD
+          "SOURCE_COMMIT=$commit" >> $env:GITHUB_ENV
+
+      - name: Validate distribution workflow and detect local candidate state
+        if: steps.resolve.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/runtime-distribution/runtime-distribution-cli.js validate-workflows
+
+      - name: Build verified Windows x64 runtime artifact
+        if: steps.resolve.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $url = "https://github.com/${{ github.repository }}/releases/download/dsh-runtime-v$env:RUNTIME_VERSION/dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
+          node scripts/build-verified-runtime-artifact.js `
+            --source-runtime upstream/apps/cli `
+            --frontend-dist upstream/apps/web/dist `
+            --frontend-package-json upstream/apps/web/package.json `
+            --output artifacts `
+            --version $env:RUNTIME_VERSION `
+            --platform $env:RUNTIME_PLATFORM `
+            --arch $env:RUNTIME_ARCH `
+            --artifact-url $url `
+            --source-revision $env:SOURCE_COMMIT `
+            --pnpm-version $env:PNPM_VERSION | Tee-Object artifacts/factory.log
+
+      - name: Publish immutable candidate Release assets
+        if: steps.resolve.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "dsh-runtime-v$env:RUNTIME_VERSION"
+          $zip = "artifacts/dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
+          $index = 'artifacts/runtime-index.json'
+          gh release create $tag $zip $index --repo $env:GITHUB_REPOSITORY --title "DSH runtime $env:RUNTIME_VERSION" --notes "CANDIDATE_PUBLISHED; WAITING_FOR_PROMOTION" --prerelease
+          "REMOTE_PUBLISH=CANDIDATE_PUBLISHED" >> $env:GITHUB_ENV
+
+      - name: Verify remote candidate readback
+        if: steps.resolve.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "dsh-runtime-v$env:RUNTIME_VERSION"
+          $assetName = "dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
+          $release = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets | ConvertFrom-Json
+          $asset = @($release.assets | Where-Object { $_.name -eq $assetName })
+          if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded') { throw "Remote candidate asset readback failed" }
+          $remoteZip = Join-Path $env:RUNNER_TEMP $assetName
+          Invoke-WebRequest -Uri $asset[0].browser_download_url -OutFile $remoteZip
+          $local = Get-FileHash "artifacts/$assetName" -Algorithm SHA256
+          $remote = Get-FileHash $remoteZip -Algorithm SHA256
+          $localSize = (Get-Item "artifacts/$assetName").Length
+          $remoteSize = (Get-Item $remoteZip).Length
+          if ($local.Hash -ne $remote.Hash -or $localSize -ne $remoteSize) { throw 'Remote candidate hash/size mismatch' }
+          $index = Get-Content 'artifacts/runtime-index.json' -Raw | ConvertFrom-Json
+          $entry = $index.artifacts[0]
+          "ARTIFACT_VERSION=$($entry.version)" >> $env:GITHUB_ENV
+          "ARTIFACT_SHA256=$($local.Hash.ToLowerInvariant())" >> $env:GITHUB_ENV
+          "ARTIFACT_SIZE=$localSize" >> $env:GITHUB_ENV
+          "REMOTE_VERIFY=REMOTE_VERIFIED" >> $env:GITHUB_ENV
+
+      - name: Write factory summary and upload logs/metadata only
+        if: always() && steps.resolve.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $summary = @"
+          ## DSH Runtime Factory
+          - Upstream version: $env:RUNTIME_VERSION
+          - Source tag/commit: $env:SOURCE_TAG / $env:SOURCE_COMMIT
+          - Artifact version/hash/size: $env:ARTIFACT_VERSION / $env:ARTIFACT_SHA256 / $env:ARTIFACT_SIZE
+          - CLI: passed
+          - Web: passed
+          - Health: passed
+          - Native: passed
+          - Remote publish: $env:REMOTE_PUBLISH
+          - Remote verify: $env:REMOTE_VERIFY
+          - Status: WAITING_FOR_PROMOTION
+          "@
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          @{ version=$env:RUNTIME_VERSION; sourceTag=$env:SOURCE_TAG; sourceCommit=$env:SOURCE_COMMIT; artifactVersion=$env:ARTIFACT_VERSION; sha256=$env:ARTIFACT_SHA256; sizeBytes=$env:ARTIFACT_SIZE; remotePublish=$env:REMOTE_PUBLISH; remoteVerify=$env:REMOTE_VERIFY; status='WAITING_FOR_PROMOTION' } | ConvertTo-Json | Set-Content artifacts/factory-metadata.json
+
+      - name: Upload factory logs and metadata
+        if: always() && steps.resolve.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-runtime-factory-${{ env.RUNTIME_VERSION }}
+          path: |
+            artifacts/factory.log
+            artifacts/factory-metadata.json
+          if-no-files-found: ignore
