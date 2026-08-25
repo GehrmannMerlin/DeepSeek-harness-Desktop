@@ -98,3 +98,57 @@ test('lists candidates in descending SemVer order', async () => {
     assert.equal(await store.read('9.9.9'), null);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
+
+test('fails closed when a candidate descriptor version does not match its directory', async () => {
+  const root = await makeRoot();
+  try {
+    const zipPath = await makeZip(root);
+    const store = createFileCandidateStore({ root });
+    await store.publish(candidate(zipPath));
+    const descriptorPath = path.join(root, `candidate-${VERSION}`, 'candidate-runtime-index.json');
+    const descriptor = JSON.parse(await fs.readFile(descriptorPath, 'utf8'));
+    descriptor.version = '0.1.1';
+    await fs.writeFile(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+
+    await assert.rejects(() => store.read(VERSION), error => error.code === 'CANDIDATE_INVALID_METADATA');
+    await assert.rejects(() => store.list(), error => error.code === 'CANDIDATE_INVALID_METADATA');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('rejects a manifest that differs from the stored descriptor', async () => {
+  const root = await makeRoot();
+  try {
+    const zipPath = await makeZip(root);
+    const store = createFileCandidateStore({ root });
+    await store.publish(candidate(zipPath));
+    const manifestPath = path.join(root, `candidate-${VERSION}`, 'runtime-manifest.json');
+    const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+    manifest.arch = 'arm64';
+    await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await assert.rejects(() => store.read(VERSION), error => error.code === 'CANDIDATE_INVALID_METADATA');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('rejects a checksum sidecar that differs from the stored descriptor', async () => {
+  const root = await makeRoot();
+  try {
+    const zipPath = await makeZip(root);
+    const store = createFileCandidateStore({ root });
+    const input = candidate(zipPath);
+    await store.publish(input);
+    const checksumPath = `${store.assetPath(VERSION)}.sha256`;
+    await fs.writeFile(checksumPath, `${'b'.repeat(64)}  ${path.basename(store.assetPath(VERSION))}\n`);
+    await assert.rejects(() => store.read(VERSION), error => error.code === 'CANDIDATE_INVALID_METADATA');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('rejects ZIP bytes whose hash or size differs from the stored descriptor', async () => {
+  const root = await makeRoot();
+  try {
+    const zipPath = await makeZip(root);
+    const store = createFileCandidateStore({ root });
+    await store.publish(candidate(zipPath));
+    await fs.writeFile(store.assetPath(VERSION), 'tampered runtime bytes');
+    await assert.rejects(() => store.read(VERSION), error => error.code === 'CANDIDATE_INVALID_METADATA');
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});

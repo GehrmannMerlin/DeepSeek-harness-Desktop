@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const semver = require('semver');
+const { isDeepStrictEqual } = require('node:util');
 
 const {
   artifactFileName,
@@ -69,6 +70,9 @@ function assertDescriptorShape(descriptor) {
   if (Object.keys(descriptor).sort().join('\0') !== DESCRIPTOR_FIELDS.slice().sort().join('\0')) {
     throw codedError('CANDIDATE_INVALID_METADATA', 'candidate descriptor fields are invalid');
   }
+  if (descriptor.schemaVersion !== 1) {
+    throw codedError('CANDIDATE_INVALID_METADATA', 'candidate descriptor schema version is invalid');
+  }
   return descriptorFor(descriptor);
 }
 
@@ -83,22 +87,62 @@ async function readDescriptor(root, version) {
   const normalized = normalizeExactVersion(version);
   const directory = candidateDirectory(root, normalized);
   if (!(await exists(directory))) return null;
-  const descriptor = JSON.parse(await fsp.readFile(path.join(directory, 'candidate-runtime-index.json'), 'utf8'));
-  const validated = assertDescriptorShape(descriptor);
-  const zipName = artifactFileName(validated);
-  const required = [
-    zipName,
-    'runtime-manifest.json',
-    `${zipName}.sha256`,
-    'factory-provenance.json',
-    'candidate-runtime-index.json',
-  ];
-  for (const file of required) {
-    if (!(await exists(path.join(directory, file)))) {
-      throw codedError('CANDIDATE_INVALID_METADATA', `candidate asset is missing: ${file}`);
+  try {
+    let descriptor;
+    try {
+      descriptor = JSON.parse(await fsp.readFile(path.join(directory, 'candidate-runtime-index.json'), 'utf8'));
+    } catch (error) {
+      throw codedError('CANDIDATE_INVALID_METADATA', `candidate descriptor cannot be read: ${error.message}`);
     }
+    if (descriptor.version !== normalized) {
+      throw codedError('CANDIDATE_INVALID_METADATA', 'candidate descriptor version does not match its directory');
+    }
+    const validated = assertDescriptorShape(descriptor);
+    const zipName = artifactFileName(validated);
+    const required = [
+      zipName,
+      'runtime-manifest.json',
+      `${zipName}.sha256`,
+      'factory-provenance.json',
+      'candidate-runtime-index.json',
+    ];
+    for (const file of required) {
+      if (!(await exists(path.join(directory, file)))) {
+        throw codedError('CANDIDATE_INVALID_METADATA', `candidate asset is missing: ${file}`);
+      }
+    }
+
+    let manifest;
+    let provenance;
+    try {
+      manifest = JSON.parse(await fsp.readFile(path.join(directory, 'runtime-manifest.json'), 'utf8'));
+      provenance = JSON.parse(await fsp.readFile(path.join(directory, 'factory-provenance.json'), 'utf8'));
+    } catch (error) {
+      throw codedError('CANDIDATE_INVALID_METADATA', `candidate metadata cannot be parsed: ${error.message}`);
+    }
+    if (!isDeepStrictEqual(manifest, validated.manifest)) {
+      throw codedError('CANDIDATE_INVALID_METADATA', 'runtime manifest does not match candidate descriptor');
+    }
+    if (!isDeepStrictEqual(provenance, validated.provenance)) {
+      throw codedError('CANDIDATE_INVALID_METADATA', 'factory provenance does not match candidate descriptor');
+    }
+
+    const checksumText = await fsp.readFile(path.join(directory, `${zipName}.sha256`), 'utf8');
+    const checksumMatch = /^([a-f0-9]{64})\s+(.+?)\s*$/.exec(checksumText);
+    if (!checksumMatch || checksumMatch[1].toLowerCase() !== validated.sha256 || checksumMatch[2] !== zipName) {
+      throw codedError('CANDIDATE_INVALID_METADATA', 'checksum metadata does not match candidate descriptor');
+    }
+    const zipPath = path.join(directory, zipName);
+    const [zipBytes, zipStat] = await Promise.all([fsp.readFile(zipPath), fsp.stat(zipPath)]);
+    const observedSha256 = crypto.createHash('sha256').update(zipBytes).digest('hex');
+    if (zipStat.size !== validated.sizeBytes || observedSha256 !== validated.sha256) {
+      throw codedError('CANDIDATE_INVALID_METADATA', 'candidate ZIP identity does not match descriptor');
+    }
+    return validated;
+  } catch (error) {
+    if (error.code === 'CANDIDATE_INVALID_METADATA') throw error;
+    throw codedError('CANDIDATE_INVALID_METADATA', `candidate metadata is invalid: ${error.message}`);
   }
-  return validated;
 }
 
 async function writeJson(filePath, value) {
