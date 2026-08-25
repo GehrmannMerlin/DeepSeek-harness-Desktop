@@ -167,6 +167,17 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
+      - name: Deploy isolated production DSH package
+        if: steps.resolve.outputs.skip != 'true'
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=runtime-deploy" >> $env:GITHUB_ENV
+          if (Test-Path factory-runtime) { Remove-Item -Recurse -Force factory-runtime }
+          pnpm --filter @deepseek-ai/dsh deploy --prod --legacy factory-runtime
+          if (-not (Test-Path 'factory-runtime/package.json')) { throw 'Isolated DSH production package was not created' }
+
       - name: Verify upstream layout and exact package version
         if: steps.resolve.outputs.skip != 'true'
         shell: pwsh
@@ -198,7 +209,7 @@ jobs:
           "CURRENT_PHASE=factory" >> $env:GITHUB_ENV
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $url = "https://github.com/${{ github.repository }}/releases/download/dsh-runtime-v$env:RUNTIME_VERSION/dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
-          $resultText = node scripts/build-verified-runtime-artifact.js --source-runtime upstream/apps/cli --frontend-dist upstream/apps/web/dist --frontend-package-json upstream/apps/web/package.json --output artifacts --version $env:RUNTIME_VERSION --platform $env:RUNTIME_PLATFORM --arch $env:RUNTIME_ARCH --artifact-url $url --source-revision $env:SOURCE_COMMIT --pnpm-version $env:PNPM_VERSION 2>&1 | Tee-Object artifacts/factory.log | Out-String
+          $resultText = node scripts/build-verified-runtime-artifact.js --source-runtime upstream/factory-runtime --frontend-dist upstream/apps/web/dist --frontend-package-json upstream/apps/web/package.json --output artifacts --version $env:RUNTIME_VERSION --platform $env:RUNTIME_PLATFORM --arch $env:RUNTIME_ARCH --artifact-url $url --source-revision $env:SOURCE_COMMIT --pnpm-version $env:PNPM_VERSION 2>&1 | Tee-Object artifacts/factory.log | Out-String
           if ($LASTEXITCODE -ne 0) { throw 'Verified runtime Factory failed' }
           $result = $resultText | ConvertFrom-Json
           "FACTORY_STATUS=passed" >> $env:GITHUB_ENV

@@ -73,6 +73,16 @@ test('Windows runtime factory resolves latest before checkout and uses the exact
   assert.match(text, /package\.json.*version|version.*package\.json/s);
 });
 
+test('Windows runtime factory deploys an isolated production package before materialization', () => {
+  const text = workflowText();
+  const deploy = text.indexOf('pnpm --filter @deepseek-ai/dsh deploy --prod --legacy');
+  const factory = text.indexOf('scripts/build-verified-runtime-artifact.js');
+  assert.ok(deploy >= 0, 'Factory must deploy the selected DSH package from the workspace');
+  assert.ok(factory >= 0 && deploy < factory, 'isolated deploy must precede Factory materialization');
+  assert.match(text, /factory-runtime/);
+  assert.match(text, /--source-runtime upstream\/factory-runtime/);
+});
+
 test('Windows runtime factory invokes existing factory and CLI paths with immutable candidate publication', () => {
   const text = workflowText();
   assert.match(text, /scripts\/build-verified-runtime-artifact\.js/);
