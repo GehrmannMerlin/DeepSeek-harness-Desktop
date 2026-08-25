@@ -64,22 +64,52 @@ async function walkFiles(root, current = '') {
   return files;
 }
 
-async function copyTree(source, destination, active = new Set()) {
+async function cloneMaterializedTree(source, destination) {
+  const entries = (await fsp.readdir(source, { withFileTypes: true }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  await fsp.mkdir(destination, { recursive: true });
+  for (const entry of entries) {
+    const sourceEntry = path.join(source, entry.name);
+    const destinationEntry = path.join(destination, entry.name);
+    if (entry.isDirectory()) {
+      await cloneMaterializedTree(sourceEntry, destinationEntry);
+    } else if (entry.isFile()) {
+      await fsp.mkdir(path.dirname(destinationEntry), { recursive: true });
+      try {
+        await fsp.link(sourceEntry, destinationEntry);
+      } catch (error) {
+        if (!['EXDEV', 'EPERM', 'EEXIST'].includes(error && error.code)) throw error;
+        if (error.code === 'EEXIST') continue;
+        await fsp.copyFile(sourceEntry, destinationEntry);
+      }
+    } else {
+      throw new Error(`Factory materialized cache contains an unsupported file: ${sourceEntry}`);
+    }
+  }
+}
+
+async function copyTree(source, destination, active = new Set(), materialized = new Map()) {
   const realSource = await fsp.realpath(source);
   const stat = await fsp.lstat(source);
   if (stat.isSymbolicLink()) {
     if (active.has(realSource)) return;
-    return copyTree(realSource, destination, active);
+    return copyTree(realSource, destination, active, materialized);
   }
   if (active.has(realSource)) throw new Error(`Factory source contains a recursive link: ${source}`);
+  const cachedDestination = materialized.get(realSource);
+  if (cachedDestination) {
+    await cloneMaterializedTree(cachedDestination, destination);
+    return;
+  }
   active.add(realSource);
+  materialized.set(realSource, destination);
   try {
     if (stat.isDirectory()) {
       await fsp.mkdir(destination, { recursive: true });
       const entries = (await fsp.readdir(source, { withFileTypes: true }))
         .filter((entry) => !(path.basename(source) === 'node_modules' && (entry.name === '.pnpm' || entry.name === '.pnpm-workspace-state-v1.json')))
         .sort((left, right) => left.name.localeCompare(right.name));
-      for (const entry of entries) await copyTree(path.join(source, entry.name), path.join(destination, entry.name), active);
+      for (const entry of entries) await copyTree(path.join(source, entry.name), path.join(destination, entry.name), active, materialized);
       return;
     }
     if (!stat.isFile()) throw new Error(`Factory source contains an unsupported file: ${source}`);

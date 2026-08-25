@@ -6,7 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const unzipper = require('unzipper');
 
-const { buildVerifiedRuntimeArtifact } = require('../scripts/build-verified-runtime-artifact');
+const { buildVerifiedRuntimeArtifact, copyTree } = require('../scripts/build-verified-runtime-artifact');
 const { withTempDir, writeJson } = require('./test-helpers');
 
 test('factory creates a portable ZIP, index identity, and archive self-smoke', async () => {
@@ -67,5 +67,33 @@ test('factory skips recursive source links while preserving the portable runtime
     assert.ok(names.includes('runtime-manifest.json'));
     assert.ok(names.includes('node_modules/@deepseek-ai/dsh/lib/bin.js'));
     assert.ok(!names.some((name) => name.includes('recursive-link')));
+  });
+});
+
+test('factory reuses materialized targets for repeated source links', async () => {
+  await withTempDir(async (root) => {
+    const source = path.join(root, 'source-runtime');
+    const shared = path.join(source, 'shared');
+    const destination = path.join(root, 'destination');
+    await fs.mkdir(shared, { recursive: true });
+    await fs.writeFile(path.join(shared, 'payload.txt'), 'shared payload\n', 'utf8');
+    await fs.symlink(shared, path.join(source, 'first'), process.platform === 'win32' ? 'junction' : 'dir');
+    await fs.symlink(shared, path.join(source, 'second'), process.platform === 'win32' ? 'junction' : 'dir');
+
+    const originalCopyFile = fs.copyFile;
+    let copyFileCount = 0;
+    fs.copyFile = async (...args) => {
+      copyFileCount += 1;
+      return originalCopyFile(...args);
+    };
+    try {
+      await copyTree(source, destination);
+    } finally {
+      fs.copyFile = originalCopyFile;
+    }
+
+    assert.equal(copyFileCount, 1);
+    assert.equal(await fs.readFile(path.join(destination, 'first', 'payload.txt'), 'utf8'), 'shared payload\n');
+    assert.equal(await fs.readFile(path.join(destination, 'second', 'payload.txt'), 'utf8'), 'shared payload\n');
   });
 });
