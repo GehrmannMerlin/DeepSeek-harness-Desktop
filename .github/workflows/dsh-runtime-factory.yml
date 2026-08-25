@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: dsh-runtime-factory-${{ github.repository }}-${{ inputs.version || 'latest' }}
+  group: dsh-runtime-factory-${{ github.repository }}
   cancel-in-progress: false
 
 env:
@@ -57,6 +57,13 @@ jobs:
           $zipName = "dsh-runtime-$version-win32-x64.zip"
           $indexName = 'runtime-index.json'
           $expectedUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$zipName"
+          $sourceRefs = git ls-remote 'https://github.com/deepseek-ai/deepseek-harness.git' "refs/tags/dsh-v$version" "refs/tags/dsh-v$version^{}"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to resolve exact upstream tag dsh-v$version" }
+          $peeled = @($sourceRefs | Where-Object { $_ -match "^([0-9a-f]{40})\s+refs/tags/dsh-v$version\^\{\}$" })
+          $direct = @($sourceRefs | Where-Object { $_ -match "^([0-9a-f]{40})\s+refs/tags/dsh-v$version$" })
+          $sourceCommit = if ($peeled.Count -gt 0) { $peeled[0].Split()[0] } elseif ($direct.Count -gt 0) { $direct[0].Split()[0] } else { $null }
+          if ([string]::IsNullOrWhiteSpace($sourceCommit) -or $sourceCommit -notmatch '^[0-9a-f]{40}$') { throw "Exact upstream tag dsh-v$version is absent; no master fallback is permitted" }
+          "EXPECTED_SOURCE_COMMIT=$sourceCommit" >> $env:GITHUB_ENV
           $releaseError = ''
           $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>&1
           if ($LASTEXITCODE -ne 0) {
@@ -88,7 +95,8 @@ jobs:
               $zipHash = (Get-FileHash $remoteZip -Algorithm SHA256).Hash.ToLowerInvariant()
               $zipSize = (Get-Item $remoteZip).Length
               if ($zipHash -ne $entry.sha256 -or $zipSize -ne $entry.sizeBytes) { throw 'Existing candidate ZIP identity conflicts with runtime-index.json' }
-              if ($release.body -notmatch "SOURCE_TAG=dsh-v$version" -or $release.body -notmatch 'SOURCE_COMMIT=[0-9a-f]{40}') { throw 'Existing candidate source/tag identity is stale or missing' }
+              $sourceCommitMatch = [regex]::Match($release.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
+              if ($release.body -notmatch "SOURCE_TAG=dsh-v$version" -or -not $sourceCommitMatch.Success -or $sourceCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Existing candidate source/tag identity does not match the exact upstream tag commit' }
               "VALIDATED_NOOP=true" >> $env:GITHUB_ENV
               "CANDIDATE_STATUS=VALIDATED_CANDIDATE_NOOP" >> $env:GITHUB_ENV
               "skip=true" >> $env:GITHUB_OUTPUT
@@ -145,6 +153,7 @@ jobs:
           $package = Get-Content 'upstream/apps/cli/package.json' -Raw | ConvertFrom-Json
           $webPackage = Get-Content 'upstream/apps/web/package.json' -Raw | ConvertFrom-Json
           if ($package.version -ne $env:RUNTIME_VERSION -or $webPackage.version -ne $env:RUNTIME_VERSION) { throw 'Upstream package version mismatch' }
+          if ((git -C upstream rev-parse HEAD).Trim() -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Checked out upstream commit does not match exact resolved tag commit' }
           "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" >> $env:GITHUB_ENV
           "SOURCE_COMMIT=$(git -C upstream rev-parse HEAD)" >> $env:GITHUB_ENV
 
@@ -211,7 +220,8 @@ jobs:
           }
           $release = $releaseJson | ConvertFrom-Json
           if ($release.tag_name -ne $tag -or $release.draft -ne $false -or $release.prerelease -ne $true) { throw 'Release state is stale, draft, or non-prerelease' }
-          if ($release.body -notmatch "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" -or $release.body -notmatch 'SOURCE_COMMIT=[0-9a-f]{40}') { throw 'Existing Release source/tag identity is stale or missing' }
+          $sourceCommitMatch = [regex]::Match($release.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
+          if ($release.body -notmatch "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" -or -not $sourceCommitMatch.Success -or $sourceCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Existing Release source/tag identity does not match the exact upstream tag commit' }
           foreach ($localPath in @($zip, $index)) {
             $name = Split-Path $localPath -Leaf
             $remote = @($release.assets | Where-Object { $_.name -eq $name })
@@ -246,7 +256,8 @@ jobs:
           $zipName = "dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
           $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
           if ($release.tag_name -ne $tag -or $release.draft -ne $false -or $release.prerelease -ne $true) { throw 'Remote Release state is invalid' }
-          if ($release.body -notmatch "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" -or $release.body -notmatch 'SOURCE_COMMIT=[0-9a-f]{40}') { throw 'Remote source/tag identity is invalid' }
+          $sourceCommitMatch = [regex]::Match($release.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
+          if ($release.body -notmatch "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" -or -not $sourceCommitMatch.Success -or $sourceCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Remote source/tag identity is invalid' }
           $root = Join-Path $env:RUNNER_TEMP "remote-$env:RUNTIME_VERSION"
           New-Item -ItemType Directory -Force $root | Out-Null
           $zipAsset = @($release.assets | Where-Object { $_.name -eq $zipName })

@@ -72,7 +72,10 @@ test('Windows runtime factory invokes existing factory and CLI paths with immuta
 
 test('candidate Release publication is serialized, explicit, idempotent, and conflict-safe', () => {
   const text = workflowText();
-  assert.match(text, /concurrency:\s*\n\s*group:.*github\.repository.*(?:inputs\.version|latest)/s);
+  const concurrencyGroup = text.match(/concurrency:\s*\n\s*group:\s*([^\n]+)/s);
+  assert.ok(concurrencyGroup, 'workflow must declare a concurrency group');
+  assert.match(concurrencyGroup[1], /dsh-runtime-factory.*github\.repository/);
+  assert.doesNotMatch(concurrencyGroup[1], /inputs\.version|latest/);
   assert.match(text, /cancel-in-progress:\s*false/);
   assert.match(text, /gh api .*releases\/tags/);
   assert.match(text, /releaseJson.*(?:LASTEXITCODE|releaseExists)|release.*(?:absent|not found)/is);
@@ -90,6 +93,23 @@ test('candidate Release publication is serialized, explicit, idempotent, and con
   assert.doesNotMatch(text, /gh release upload[^\n]*--clobber/);
   assert.match(text, /(?:after create|after upload|verify).*assets|assets.*(?:after create|after upload|verify)/is);
   assert.doesNotMatch(text, /gh release create[^\n]*(?:\.zip|runtime-index\.json)/i);
+});
+
+test('existing-candidate preflight resolves and compares the exact peeled upstream tag commit', () => {
+  const text = workflowText();
+  const tagResolution = text.indexOf('git ls-remote');
+  const releaseRead = text.indexOf('releases/tags/');
+  assert.ok(tagResolution >= 0, 'workflow must resolve the upstream tag commit read-only');
+  assert.ok(tagResolution < releaseRead, 'exact source commit must resolve before Release preflight');
+  assert.match(text, /refs\/tags\/dsh-v/);
+  assert.match(text, /\^\{\}/);
+  assert.match(text, /EXPECTED_SOURCE_COMMIT/);
+  assert.match(text, /(?:peeled|peel|\^\{\}).*(?:direct|fallback)|(?:direct|fallback).*(?:peeled|peel|\^\{\})/is);
+  assert.match(text, /if \(.*(?:EXPECTED_SOURCE_COMMIT|sourceCommit).*(?:-notmatch|empty|missing)|throw.*(?:tag|commit).*(?:absent|available|missing)/is);
+  assert.match(text, /SOURCE_COMMIT.*EXPECTED_SOURCE_COMMIT|EXPECTED_SOURCE_COMMIT.*SOURCE_COMMIT/s);
+  assert.match(text, /(?:sourceCommit|SOURCE_COMMIT).*-(?:ne|eq).*EXPECTED_SOURCE_COMMIT|EXPECTED_SOURCE_COMMIT.*(?:-ne|-eq).*sourceCommit/s);
+  assert.match(text, /git -C upstream rev-parse HEAD/);
+  assert.doesNotMatch(text, /refs\/heads\/(?:master|main)|ref:\s*(?:master|main)/i);
 });
 
 test('factory summary derives phase status and gates promotion readiness on complete success', () => {
