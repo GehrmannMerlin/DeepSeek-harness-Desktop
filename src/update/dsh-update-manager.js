@@ -76,7 +76,10 @@ class DshUpdateManager extends EventEmitter {
   constructor({
     runtimeManager,
     registry,
+    upstreamSource,
+    verifiedSource,
     installer,
+    artifactDownloader,
     verifier,
     processManager,
     healthChecker,
@@ -85,12 +88,15 @@ class DshUpdateManager extends EventEmitter {
     urlWaitTimeoutMs = DEFAULT_URL_WAIT_TIMEOUT_MS,
   } = {}) {
     super();
-    for (const [name, dependency] of Object.entries({ runtimeManager, registry, installer, verifier, processManager, healthChecker })) {
+    for (const [name, dependency] of Object.entries({ runtimeManager, registry: registry || upstreamSource, verifier, processManager, healthChecker })) {
       if (!dependency) throw new TypeError(`${name} is required`);
     }
+    if (!installer && !artifactDownloader) throw new TypeError('installer or artifactDownloader is required');
     this.runtimeManager = runtimeManager;
-    this.registry = registry;
+    this.registry = registry || upstreamSource;
+    this.verifiedSource = verifiedSource || null;
     this.installer = installer;
+    this.artifactDownloader = artifactDownloader || null;
     this.verifier = verifier;
     this.processManager = processManager;
     this.healthChecker = healthChecker;
@@ -113,6 +119,8 @@ class DshUpdateManager extends EventEmitter {
       state: STATES.IDLE,
       currentRuntime: null,
       latest: null,
+      upstreamLatestVersion: null,
+      verifiedLatestVersion: null,
       preparedRuntime: null,
       updateAvailable: false,
       pending: false,
@@ -180,13 +188,27 @@ class DshUpdateManager extends EventEmitter {
       const state = typeof this.runtimeManager.getState === 'function'
         ? await this.runtimeManager.getState()
         : { failedVersions: {} };
-      const latest = await this.registry.getLatest();
-      this._validateLatest(latest);
+      let upstreamLatest = null;
+      let upstreamError = null;
+      try {
+        upstreamLatest = await this.registry.getLatest();
+        this._validateLatest(upstreamLatest);
+      } catch (error) {
+        upstreamError = error;
+        if (!this.verifiedSource) throw error;
+        this._logError('DSH upstream registry observation failed; continuing with verified index', error);
+      }
+      const latest = this.verifiedSource
+        ? await this.verifiedSource.getLatest({ platform: process.platform, arch: process.arch })
+        : upstreamLatest;
+      if (this.verifiedSource) this._validateVerifiedLatest(latest);
       this._patch({
         latest: clone(latest),
+        upstreamLatestVersion: upstreamLatest ? upstreamLatest.version : null,
+        verifiedLatestVersion: this.verifiedSource ? latest.version : null,
         lastCheckedAt: this._nowIso(),
         pending: Boolean(state && state.pending),
-        error: null,
+        error: upstreamError ? errorDetails(upstreamError) : null,
       });
 
       const comparison = this._compareLatest(currentRuntime && currentRuntime.version, latest.version);
@@ -224,22 +246,35 @@ class DshUpdateManager extends EventEmitter {
     let prepared;
     try {
       this._transition(STATES.INSTALLING, { progress: { phase: 'installing', version: latest.version } });
-      const installResult = await this.installer.install({
-        stagingRoot,
-        packageName: PACKAGE_NAME,
-        version: latest.version,
-      });
-      if (!installResult || installResult.ok !== true) {
-        throw makeError(this._resultError(installResult, 'Runtime installation failed'), 'RUNTIME_INSTALL_FAILED');
+      let preparedRoot = stagingRoot;
+      if (this.artifactDownloader) {
+        const artifactResult = await this.artifactDownloader.prepare({
+          artifact: latest,
+          stagingRoot: path.dirname(stagingRoot),
+          operationId: path.basename(stagingRoot),
+          packageName: PACKAGE_NAME,
+          version: latest.version,
+        });
+        preparedRoot = artifactResult && (artifactResult.rootPath || artifactResult.stagingRoot);
+        if (!preparedRoot) throw makeError('Runtime artifact preparation returned no root', 'RUNTIME_ARTIFACT_PREPARE_FAILED');
+      } else {
+        const installResult = await this.installer.install({
+          stagingRoot,
+          packageName: PACKAGE_NAME,
+          version: latest.version,
+        });
+        if (!installResult || installResult.ok !== true) {
+          throw makeError(this._resultError(installResult, 'Runtime installation failed'), 'RUNTIME_INSTALL_FAILED');
+        }
       }
 
       this._transition(STATES.VERIFYING, { progress: { phase: 'verifying', version: latest.version } });
-      const verifyResult = await this._verifyStaging(stagingRoot, latest.version);
+      const verifyResult = await this._verifyStaging(preparedRoot, latest.version);
       if (!verifyResult || verifyResult.ok !== true) {
         throw makeError(this._resultError(verifyResult, 'Runtime verification failed'), 'RUNTIME_VERIFY_FAILED');
       }
 
-      prepared = await this.runtimeManager.promoteStaging(stagingRoot, latest.version);
+      prepared = await this.runtimeManager.promoteStaging(preparedRoot, latest.version);
       if (!prepared || typeof prepared !== 'object') throw makeError('Runtime promotion returned no descriptor', 'RUNTIME_PROMOTE_FAILED');
       this._transition(STATES.READY_TO_APPLY, {
         preparedRuntime: clone(prepared),
@@ -470,6 +505,13 @@ class DshUpdateManager extends EventEmitter {
   _validateLatest(latest) {
     if (!latest || typeof latest !== 'object' || (latest.packageName || latest.name) !== PACKAGE_NAME || latest.distTag !== 'latest' || !semver.valid(latest.version)) {
       throw makeError('Registry returned invalid latest metadata', 'INVALID_REGISTRY_RESULT');
+    }
+  }
+
+  _validateVerifiedLatest(latest) {
+    if (!latest || typeof latest !== 'object' || latest.packageName !== PACKAGE_NAME || !semver.valid(latest.version) ||
+        (latest.platform && latest.platform !== process.platform) || (latest.arch && latest.arch !== process.arch)) {
+      throw makeError('Verified runtime source returned invalid metadata', 'INVALID_VERIFIED_RUNTIME_RESULT');
     }
   }
 

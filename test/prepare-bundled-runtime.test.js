@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs').promises;
 const path = require('node:path');
@@ -66,6 +67,17 @@ test('bundled version defaults to the pinned exact SemVer and accepts only exact
   }
 });
 
+test('default preparation refuses to resolve DSH through live npm without a verified artifact', async () => {
+  await withTempDir(async (directory) => {
+    await assert.rejects(() => prepareBundledRuntime({
+      outputRoot: path.join(directory, 'build', 'bundled-runtime'),
+      version: '0.1.0-rc.7',
+      npmCommand: 'missing-npm.cmd',
+      logger: { info() {} },
+    }), /verified runtime artifact/i);
+  });
+});
+
 test('prepares a verified runtime with exact npm args and safe spawn options', async () => {
   await withTempDir(async (directory) => {
     const outputRoot = path.join(directory, 'build', 'bundled-runtime');
@@ -102,9 +114,54 @@ test('prepares a verified runtime with exact npm args and safe spawn options', a
       name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', bin: { dsh: 'bin/dsh.js' },
     });
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(outputRoot, 'runtime-manifest.json'), 'utf8')), {
-      name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', source: 'npm', immutable: true,
+      name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', source: 'npm-diagnostic', immutable: true,
     });
     assert.equal(await fs.access(path.join(outputRoot, 'package-lock.json')).then(() => true, () => false), false);
+  });
+});
+
+test('prepares bundled runtime from a verified artifact without invoking npm', async () => {
+  await withTempDir(async (directory) => {
+    const outputRoot = path.join(directory, 'build', 'bundled-runtime');
+    const artifactPath = path.join(directory, 'dsh-runtime.zip');
+    const artifactBytes = Buffer.from('verified-artifact');
+    await fs.writeFile(artifactPath, artifactBytes);
+    const artifactMetadata = {
+      sizeBytes: artifactBytes.length,
+      sha256: crypto.createHash('sha256').update(artifactBytes).digest('hex'),
+    };
+
+    const result = await prepareBundledRuntime({
+      outputRoot,
+      artifactPath,
+      artifactMetadata,
+      version: '0.1.0-rc.7',
+      spawnProcess() { throw new Error('npm must not be called for an artifact'); },
+      extractArtifactImpl: async ({ extractionRoot }) => {
+        await installFixture(['--prefix', extractionRoot], { version: '0.1.0-rc.7' });
+        await writeJson(path.join(extractionRoot, 'runtime-manifest.json'), {
+          schemaVersion: 1,
+          packageName: '@deepseek-ai/dsh',
+          version: '0.1.0-rc.7',
+          platform: 'win32',
+          arch: 'x64',
+          cliEntry: 'node_modules/@deepseek-ai/dsh/bin/dsh.js',
+        });
+      },
+      runCommand: async () => ({ code: 0, stdout: 'dsh 0.1.0-rc.7\n', stderr: '' }),
+      smokeRuntimeImpl: async () => ({ ok: true }),
+      logger: { info() {} },
+    });
+
+    assert.equal(result.source, 'verified-artifact');
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(outputRoot, 'runtime-manifest.json'), 'utf8')), {
+      schemaVersion: 1,
+      packageName: '@deepseek-ai/dsh',
+      version: '0.1.0-rc.7',
+      platform: 'win32',
+      arch: 'x64',
+      cliEntry: 'node_modules/@deepseek-ai/dsh/bin/dsh.js',
+    });
   });
 });
 

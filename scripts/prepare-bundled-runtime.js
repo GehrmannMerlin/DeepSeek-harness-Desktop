@@ -1,6 +1,6 @@
 'use strict';
 
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs').promises;
 const path = require('node:path');
@@ -8,6 +8,9 @@ const semver = require('semver');
 
 const { verifyRuntime } = require('../src/update/runtime-verifier');
 const { resolveNpmInvocation } = require('../src/update/npm-command');
+const { extractZip } = require('../src/update/runtime-artifact-downloader');
+const { validateManifest } = require('../src/runtime/verified-runtime-artifact');
+const { defaultSmoke } = require('./build-verified-runtime-artifact');
 
 const PACKAGE_NAME = '@deepseek-ai/dsh';
 const DEFAULT_BUNDLED_VERSION = '0.1.0-rc.7';
@@ -150,55 +153,136 @@ async function replaceOutput(tempRoot, outputRoot, fsImpl) {
   if (hadPrevious) await fsImpl.rm(backupRoot, { recursive: true, force: true });
 }
 
+async function hashFile(filePath, fsImpl) {
+  const hash = createHash('sha256');
+  const contents = await fsImpl.readFile(filePath);
+  hash.update(contents);
+  return { sizeBytes: contents.length, sha256: hash.digest('hex') };
+}
+
+async function prepareFromVerifiedArtifact({
+  artifactPath,
+  artifactMetadata,
+  tempRoot,
+  exactVersion,
+  extractArtifactImpl,
+  verifyRuntimeImpl,
+  nodeCommand,
+  runCommand,
+  smokeRuntimeImpl = defaultSmoke,
+  fsImpl,
+}) {
+  const resolvedArtifactPath = path.resolve(artifactPath);
+  const localIdentity = {
+    packageName: PACKAGE_NAME,
+    version: exactVersion,
+    platform: process.platform,
+    arch: process.arch,
+  };
+  if (artifactMetadata) {
+    if (!Number.isSafeInteger(artifactMetadata.sizeBytes) || typeof artifactMetadata.sha256 !== 'string') {
+      throw new Error('Verified runtime artifact metadata is incomplete');
+    }
+    const observed = await hashFile(resolvedArtifactPath, fsImpl);
+    if (observed.sizeBytes !== artifactMetadata.sizeBytes || observed.sha256 !== artifactMetadata.sha256.toLowerCase()) {
+      throw new Error('Verified runtime artifact file identity does not match its metadata');
+    }
+  }
+  await extractArtifactImpl({ archivePath: resolvedArtifactPath, extractionRoot: tempRoot });
+  let manifest;
+  try {
+    manifest = JSON.parse(await fsImpl.readFile(path.join(tempRoot, 'runtime-manifest.json'), 'utf8'));
+  } catch (error) {
+    throw new Error(`Verified runtime artifact manifest is missing or invalid: ${error.message}`);
+  }
+  validateManifest(manifest, localIdentity);
+  const verification = await verifyRuntimeImpl({
+    rootPath: tempRoot,
+    expectedVersion: exactVersion,
+    nodeCommand,
+    ...(runCommand ? { runCommand } : {}),
+  });
+  if (!verification || !verification.ok) {
+    const reason = verification && verification.reason ? verification.reason : 'runtime-verification-failed';
+    throw new Error(`Bundled runtime verification failed: ${reason}`);
+  }
+  const smoke = await smokeRuntimeImpl({ rootPath: tempRoot, manifest });
+  if (!smoke || smoke.ok === false || smoke.web === 'failed' || smoke.native === 'failed') throw new Error('Bundled runtime Web/native smoke failed');
+  return { manifest, resolvedArtifactPath };
+}
+
 async function prepareBundledRuntime({
   outputRoot,
+  artifactPath = process.env.DSH_VERIFIED_RUNTIME_ARTIFACT,
+  artifactMetadata,
+  extractArtifactImpl = extractZip,
   npmCommand = DEFAULT_NPM_COMMAND,
   version,
   spawnProcess = defaultSpawnProcess,
   verifyRuntimeImpl = verifyRuntime,
   nodeCommand = process.execPath,
   runCommand,
+  smokeRuntimeImpl = defaultSmoke,
   logger = console,
   fsImpl = fs,
   installTimeoutMs = DEFAULT_INSTALL_TIMEOUT_MS,
 } = {}) {
   const exactVersion = resolveBundledVersion(version);
   const finalRoot = normalizeOutputRoot(outputRoot);
+  const legacyInstallWasExplicitlyInjected = spawnProcess !== defaultSpawnProcess;
+  if (!artifactPath && !legacyInstallWasExplicitlyInjected) {
+    throw new Error('A verified runtime artifact is required; set DSH_VERIFIED_RUNTIME_ARTIFACT or pass artifactPath');
+  }
   const parentRoot = path.dirname(finalRoot);
   const tempRoot = path.join(parentRoot, `.bundled-runtime-${process.pid}-${Date.now()}-${randomUUID()}`);
 
   await fsImpl.mkdir(parentRoot, { recursive: true });
   try {
     await fsImpl.mkdir(tempRoot, { recursive: true });
-    await fsImpl.writeFile(path.join(tempRoot, 'package.json'), '{"private":true}\n', 'utf8');
-    await runNpmInstall({
-      npmCommand,
-      stagingRoot: tempRoot,
-      version: exactVersion,
-      spawnProcess,
-      installTimeoutMs,
-    });
+    if (artifactPath) {
+      await prepareFromVerifiedArtifact({
+        artifactPath,
+        artifactMetadata,
+        tempRoot,
+        exactVersion,
+        extractArtifactImpl,
+        verifyRuntimeImpl,
+        nodeCommand,
+        runCommand,
+        smokeRuntimeImpl,
+        fsImpl,
+      });
+    } else {
+      await fsImpl.writeFile(path.join(tempRoot, 'package.json'), '{"private":true}\n', 'utf8');
+      await runNpmInstall({
+        npmCommand,
+        stagingRoot: tempRoot,
+        version: exactVersion,
+        spawnProcess,
+        installTimeoutMs,
+      });
 
-    const verification = await verifyRuntimeImpl({
-      rootPath: tempRoot,
-      expectedVersion: exactVersion,
-      nodeCommand,
-      ...(runCommand ? { runCommand } : {}),
-    });
-    if (!verification || !verification.ok) {
-      const reason = verification && verification.reason ? verification.reason : 'runtime-verification-failed';
-      throw new Error(`Bundled runtime verification failed: ${reason}`);
+      const verification = await verifyRuntimeImpl({
+        rootPath: tempRoot,
+        expectedVersion: exactVersion,
+        nodeCommand,
+        ...(runCommand ? { runCommand } : {}),
+      });
+      if (!verification || !verification.ok) {
+        const reason = verification && verification.reason ? verification.reason : 'runtime-verification-failed';
+        throw new Error(`Bundled runtime verification failed: ${reason}`);
+      }
+
+      await fsImpl.writeFile(path.join(tempRoot, 'runtime-manifest.json'), `${JSON.stringify({
+        name: PACKAGE_NAME,
+        version: exactVersion,
+        source: 'npm-diagnostic',
+        immutable: true,
+      }, null, 2)}\n`, 'utf8');
     }
-
-    await fsImpl.writeFile(path.join(tempRoot, 'runtime-manifest.json'), `${JSON.stringify({
-      name: PACKAGE_NAME,
-      version: exactVersion,
-      source: 'npm',
-      immutable: true,
-    }, null, 2)}\n`, 'utf8');
     await replaceOutput(tempRoot, finalRoot, fsImpl);
     if (logger && typeof logger.info === 'function') logger.info(`Prepared immutable bundled DSH runtime ${exactVersion} at ${finalRoot}`);
-    return { rootPath: finalRoot, version: exactVersion };
+    return { rootPath: finalRoot, version: exactVersion, source: artifactPath ? 'verified-artifact' : 'npm-diagnostic' };
   } catch (error) {
     try { await fsImpl.rm(tempRoot, { recursive: true, force: true }); } catch (_) { /* retain the original failure */ }
     throw error;
@@ -224,5 +308,6 @@ module.exports = {
   exactSemver,
   resolveBundledVersion,
   prepareBundledRuntime,
+  prepareFromVerifiedArtifact,
   main,
 };

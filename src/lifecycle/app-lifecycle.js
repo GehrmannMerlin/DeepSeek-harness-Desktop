@@ -15,7 +15,8 @@ const { checkToolchain } = require('../utils/npx-resolver');
 const { RuntimeStateStore } = require('../runtime/runtime-state-store');
 const { DshRuntimeManager } = require('../runtime/dsh-runtime-manager');
 const { NpmRegistryUpdateSource } = require('../update/npm-registry-update-source');
-const { NpmInstaller } = require('../update/npm-installer');
+const { VerifiedRuntimeUpdateSource } = require('../update/verified-runtime-update-source');
+const { RuntimeArtifactDownloader } = require('../update/runtime-artifact-downloader');
 const { verifyRuntime } = require('../update/runtime-verifier');
 const { DshUpdateManager, STATES: UPDATE_STATES } = require('../update/dsh-update-manager');
 const { UpdateDialog } = require('../window/update-dialog');
@@ -48,6 +49,8 @@ class AppLifecycle {
     stateStore,
     runtimeManager,
     registry,
+    verifiedSource,
+    artifactDownloader,
     installer,
     verifier,
     healthChecker,
@@ -82,15 +85,19 @@ class AppLifecycle {
       logger: this.appLogger,
     });
     this.registry = registry || NpmRegistryUpdateSource({ logger: this.appLogger });
-    this.installer = installer || NpmInstaller({
-      npmCommand: process.platform === 'win32' ? 'npm.cmd' : 'npm',
-      logger: this.appLogger,
-    });
+    this.verifiedSource = verifiedSource || VerifiedRuntimeUpdateSource({ logger: this.appLogger });
+    this.artifactDownloader = artifactDownloader || RuntimeArtifactDownloader({ logger: this.appLogger });
+    // NpmInstaller is intentionally not constructed here. It remains an
+    // explicit diagnostic/test dependency only; production updates consume a
+    // verified artifact selected by the immutable runtime index.
+    this.installer = installer || null;
     this.verifier = verifier || { verify: verifyRuntime };
     this.healthChecker = healthChecker || { waitUntilReady };
     this.updateManager = updateManager || new DshUpdateManager({
       runtimeManager: this.runtimeManager,
       registry: this.registry,
+      verifiedSource: this.verifiedSource,
+      artifactDownloader: this.artifactDownloader,
       installer: this.installer,
       verifier: this.verifier,
       processManager: this.processManager,

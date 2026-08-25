@@ -4,6 +4,10 @@ mark('process_start');
 
 const { app, Menu } = require('electron');
 const { AppLifecycle } = require('./lifecycle/app-lifecycle');
+const { applyReleaseE2eUserData } = require('./lifecycle/release-e2e-user-data');
+const { attachReleaseE2eUpdateDriver } = require('./lifecycle/release-e2e-update-driver');
+
+applyReleaseE2eUserData(app);
 
 // On Windows 11 25H2 (build 26200) Chromium runs the GPU process in an LPAC
 // (Less-Privileged AppContainer) sandbox, and the renderer in an AppContainer
@@ -46,6 +50,7 @@ if (!gotLock) {
     mark('app_ready');
     Menu.setApplicationMenu(null); // no default File/Edit/View/Window menu
     lifecycle = new AppLifecycle();
+    attachReleaseE2eUpdateDriver(lifecycle);
     lifecycle.start().catch((err) => {
       // eslint-disable-next-line no-console
       console.error('lifecycle error:', err);

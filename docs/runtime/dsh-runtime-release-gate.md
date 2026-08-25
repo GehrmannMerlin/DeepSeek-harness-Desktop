@@ -8,9 +8,11 @@ Status: BLOCKED
 
 ## Initial blocker
 
-Real DSH package installation does not complete successfully.
-One bounded real npm process exited with code 134.
-No verified real bundled runtime exists.
+Real DSH package installation through the historical npm path does not
+complete successfully; one bounded real npm process exited with code 134.
+The approved Route B Factory path now produced and independently self-smoked a
+verified real artifact, but the Desktop update/restart/rollback and installer
+gates are not complete, so the overall gate remains BLOCKED.
 
 This document records fresh Release Gate evidence for this task. The historical
 Task 13 record remains in `docs/runtime/dsh-runtime-update-verification.md` and
@@ -18,7 +20,60 @@ is not overwritten.
 
 ## Evidence log
 
-Fresh evidence will be appended below as each Release Gate step is completed.
+### Route B verified artifact — PASS
+
+Factory source: official DSH revision `99f6f02fe`, Node `24.18.0`,
+`pnpm@11.7.0`, frozen lockfile, Windows `win32-x64`. The Factory assembled a
+portable runtime without junctions, included the built `apps/web/dist`, wrote
+the runtime manifest, created a ZIP, hashed it, independently extracted it,
+and repeated CLI/Web/Health/native smoke against the extracted copy.
+
+Artifact evidence:
+
+- Archive: `C:\Users\韩吉衍\AppData\Local\Temp\dsh-runtime-factory\route-b\run-20260824-162959\factory-output-3\dsh-runtime-0.1.0-rc.7-win32-x64.zip`.
+- Size: `285760485` bytes.
+- SHA-256: `7028288f0dfd8f7bf1ef8a24e019bc0ec659c08cc33ddbd3a44a046817f6b01d`.
+- Frozen files: `55725`.
+- CLI `0.1.0-rc.7`, Web/Health, and native `node-pty` smoke: PASS.
+- `prepareBundledRuntime()` consumed this ZIP with no npm invocation and
+  published `source: verified-artifact` only after the same smoke checks.
+- `DshRuntimeManager.resolveCurrentRuntime()` resolved the published output as
+  a `bundled` descriptor with the nested DSH CLI entry and `web` argument.
+
+The first Factory archive attempt was rejected because it was incomplete. The
+second attempt was rejected because the frontend dist was missing. Only the
+third frozen ZIP above is counted as artifact PASS.
+
+### Real pack/dist/NSIS and isolated installed runtime — PASS
+
+Using the same artifact through `DSH_VERIFIED_RUNTIME_ARTIFACT`:
+
+- `npm run pack`: exit `0`; electron-builder `26.15.3` produced
+  `dist\win-unpacked` with external `resources\bundled-runtime`.
+- `npm run dist`: exit `0`; NSIS produced
+  `dist\DeepSeek Harness Desktop Setup 1.0.0.exe`.
+- Installer size: `320196300` bytes.
+- Installer SHA-256:
+  `2A9809AE8DC63FD01D4D2363FCD264F27FA488C648CB0AB98AA6DBA6F20D01AB`.
+- Isolated silent install target:
+  `C:\Users\韩吉衍\AppData\Local\Temp\dsh-artifact-nsis-install-20260824-b`.
+- Installer exit code: `0`.
+- Installed runtime CLI: `0.1.0-rc.7`, exit `0`.
+- Installed runtime Web URL: `http://127.0.0.1:3080`.
+- Installed runtime Health Checker: `{ "ok": true, "elapsed": 12 }`.
+- Installed `runtime-manifest.json` SHA-256:
+  `8A5C8C301EC11FC66A3D1D447E1DD00B8F4B546A677267D2AF5209BB18247473`.
+
+The optional real updater E2E also passed against this ZIP through a local
+HTTP server: download, byte/hash verification, real ZIP extraction,
+`verifyRuntime`, promotion, restart health, and explicit zero npm installer
+calls. This validates the updater artifact path, but its process/runtime
+manager is task-isolated; it is not a substitute for the final installed
+Desktop update/restart/rollback smoke.
+
+The first installation target was intentionally not counted: the user
+interrupted its wait and it was partial. The second target above completed
+naturally and is the only install result counted.
 
 ## Environment snapshot
 
@@ -137,13 +192,17 @@ if that remains necessary.
 ## Current Release Gate checklist
 
 - [x] Real npm Registry metadata PASS
-- [ ] Real pinned DSH install PASS — BLOCKED by idealTree V8 heap exhaustion / bounded non-completion
-- [ ] Real bundled-runtime preparation PASS — not run after real install remained unproven
-- [ ] Real bundled package/CLI/descriptor/web/health PASS — no real runtime exists
+- [ ] Real pinned npm DSH install PASS — historical path BLOCKED by idealTree V8 heap exhaustion / bounded non-completion
+- [x] Route B Factory artifact, hash, independent extraction, CLI/Web/Health/native PASS
+- [x] Real bundled-runtime preparation consumes the verified artifact without npm
+- [x] Real bundled package/CLI/descriptor/web/health PASS for the extracted/published artifact
 - [ ] Real Managed update, restart persistence, rollback, external ownership, and pending activation PASS — not executable without a real runtime
-- [ ] Standard `npm run pack` and `npm run dist` PASS — intentionally not run against a missing real runtime
-- [ ] Real NSIS install, installed launch/update, and process cleanup PASS — not executable without a real runtime
-- [x] Deterministic regression suite: `npm test` — `107 passed`, `0 failed`, exit 0
+- [x] Standard `npm run pack` PASS with explicit verified artifact
+- [x] Standard `npm run dist`/NSIS PASS with explicit verified artifact
+- [x] Isolated NSIS install and installed DSH CLI/Web/Health PASS
+- [x] Real artifact updater E2E over local HTTP; npm installer calls: `0`
+- [ ] Installed Electron Desktop update/restart/rollback and process cleanup PASS — not run; direct installed-runtime smoke is recorded above
+- [x] Deterministic regression suite: `npm test` — `131 passed`, `0 failed`, exit 0
 - [x] `git diff --check` — exit 0
 - [x] Branch/worktree final check — `codex/dsh-runtime-updater`, clean after documentation commit
 - [x] Diagnostic process cleanup — no baseline node/npm PID remained; reused PID 28700 was `WmiPrvSE`, not a diagnostic process
@@ -152,5 +211,6 @@ if that remains necessary.
 
 Status remains: **BLOCKED**
 
-DO NOT MERGE. The real DSH install has not produced a verified runtime after
-the Node 24/npm 11.16, Node 24/npm 11.11, 4096-heap, and 8192-heap attempts.
+DO NOT MERGE. The npm installation route remains blocked, and the verified
+artifact route still lacks the real Desktop update/restart/rollback and
+packaging/NSIS evidence required by this gate.

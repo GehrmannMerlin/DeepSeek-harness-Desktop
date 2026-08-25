@@ -30,7 +30,9 @@ function createHarness({
   currentVersion = '1.0.0',
   ownsHarness = true,
   registryGetLatest,
+  verifiedGetLatest,
   installerInstall,
+  artifactPrepare,
   verifierVerify,
   healthResults = [{ ok: true }],
   failedVersions = {},
@@ -93,6 +95,18 @@ function createHarness({
       return { ok: true, stagingRoot: input.stagingRoot };
     },
   };
+  const verifiedSource = verifiedGetLatest ? {
+    async getLatest(input) {
+      calls.push(['verified', input]);
+      return verifiedGetLatest(input);
+    },
+  } : null;
+  const artifactDownloader = artifactPrepare ? {
+    async prepare(input) {
+      calls.push(['artifact', input.version]);
+      return artifactPrepare(input);
+    },
+  } : null;
   const verifier = {
     async verify(input) {
       calls.push(['verify', input.expectedVersion]);
@@ -147,6 +161,8 @@ function createHarness({
     runtimeManager,
     registry,
     installer,
+    verifiedSource,
+    artifactDownloader,
     verifier,
     processManager,
     healthChecker,
@@ -158,8 +174,37 @@ function createHarness({
   manager.on('progress', (event) => progressEvents.push(event));
   manager.on('notification', (event) => notifications.push(event));
   manager.on('update-available', (event) => updates.push(event));
-  return { manager, calls, stateChanges, progressEvents, notifications, updates, runtimeManager, installer, processManager };
+  return { manager, calls, stateChanges, progressEvents, notifications, updates, runtimeManager, installer, processManager, artifactDownloader };
 }
+
+test('uses verified artifact metadata and downloader instead of npm installer', async () => {
+  let installerCalls = 0;
+  const h = createHarness({
+    latestVersion: '1.2.0',
+    verifiedGetLatest: async () => ({
+      packageName: PACKAGE_NAME,
+      version: '1.1.0',
+      platform: 'win32',
+      arch: 'x64',
+      artifactUrl: 'https://updates.example.test/dsh.zip',
+      sizeBytes: 1,
+      sha256: 'a'.repeat(64),
+      manifest: { schemaVersion: 1, packageName: PACKAGE_NAME, version: '1.1.0', platform: 'win32', arch: 'x64', cliEntry: 'node_modules/@deepseek-ai/dsh/lib/bin.js' },
+    }),
+    installerInstall: async () => { installerCalls += 1; throw new Error('npm installer must not run'); },
+    artifactPrepare: async ({ stagingRoot }) => ({ rootPath: stagingRoot }),
+  });
+
+  const checked = await h.manager.checkForUpdates();
+  assert.equal(checked.latest.version, '1.1.0');
+  assert.equal(checked.upstreamLatestVersion, '1.2.0');
+  const applied = await h.manager.confirmUpdate();
+  assert.equal(applied.state, STATES.SUCCESS);
+  assert.equal(installerCalls, 0);
+  assert.deepEqual(h.calls.map((call) => Array.isArray(call) ? call[0] : call), [
+    'resolve-current', 'get-state', 'registry', 'verified', 'artifact', 'verify', 'promote', 'stop', 'activate', 'start', 'health',
+  ]);
+});
 
 test('no newer runtime becomes UP_TO_DATE without installing or stopping', async () => {
   const h = createHarness({ latestVersion: '1.0.0', currentVersion: '1.0.0' });

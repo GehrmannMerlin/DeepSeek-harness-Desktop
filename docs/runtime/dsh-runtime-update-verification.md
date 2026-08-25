@@ -255,3 +255,35 @@ Only these explicit paths were removed. No Program Files path, existing installa
   official Registry metadata, and a structural unpacked-directory build;
   real runtime preparation remains BLOCKED as documented above.
 - `git diff --check`: required as the final pre-commit gate.
+
+## Verified Runtime Artifact implementation follow-up
+
+The current implementation adds the artifact/index/downloader path described
+in `docs/runtime/verified-runtime-artifact-architecture.md`:
+
+- `VerifiedRuntimeArtifact` rejects wrong package, version, target, hash, size,
+  URL, manifest identity, and unsafe archive entries.
+- `VerifiedRuntimeUpdateSource` selects only the exact `win32-x64` entry from a
+  validated index; the update manager records upstream and verified versions
+  separately and compares only the verified version.
+- `RuntimeArtifactDownloader` streams to `.part`, checks byte count and
+  SHA-256 before rename, validates ZIP paths before extraction, and removes
+  failed operation output.
+- Default `AppLifecycle` wiring constructs the verified source and downloader;
+  `NpmInstaller` is no longer constructed as the production update path.
+- `prepare-bundled-runtime.js` refuses a missing verified artifact by default;
+  its explicit npm path is retained only for diagnostic/test injection.
+
+Fresh deterministic verification after this implementation:
+
+```text
+npm test
+131 passed, 0 failed, exit 0
+```
+
+Fresh real Route B artifact verification is recorded in
+`docs/runtime/dsh-runtime-release-gate.md` and
+`docs/runtime/dsh-runtime-factory-evaluation.md`. The overall release gate is
+still BLOCKED because real Desktop update/restart persistence, rollback,
+external ownership/pending activation with the artifact, `pack`/`dist`, NSIS
+install/update, and installed-app process cleanup remain to be executed.

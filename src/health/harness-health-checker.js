@@ -5,7 +5,11 @@ const { mark } = require('../utils/boot-timeline');
 // A page is "really DeepSeek Harness" when it carries the boot payload that
 // only dsh web injects. Port-open alone is not enough (the port could be held
 // by any other program).
-const SIGNATURES = ['window.__DSH_BOOT__', '<title>DeepSeek Harness</title>'];
+const SIGNATURES = [
+  'window.__DSH_BOOT__',
+  'globalThis["__DSH_BOOT__"]',
+  '<title>DeepSeek Harness</title>',
+];
 const MAX_BODY = 8192;
 
 function httpGet(url, timeoutMs) {
