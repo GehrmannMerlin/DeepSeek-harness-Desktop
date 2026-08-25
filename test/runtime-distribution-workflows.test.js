@@ -39,6 +39,12 @@ test('Windows runtime factory workflow has the required triggers and immutable t
   assert.match(text, /pnpm\/action-setup@[^\s]+[\s\S]*version:\s*\$\{\{\s*env\.PNPM_VERSION\s*\}\}/);
 });
 
+test('Windows runtime factory treats an absent candidate and failure summary as valid PowerShell paths', () => {
+  const text = workflowText();
+  assert.match(text, /\$releaseJson = \$null[\s\S]*\$LASTEXITCODE\s*=\s*0[\s\S]*"resolve_status=passed"/);
+  assert.match(text, /\$summary = @"[\s\S]*\n          "@\n/);
+});
+
 test('Windows runtime factory resolves latest before checkout and uses the exact upstream tag', () => {
   const text = workflowText();
   const checkout = text.indexOf('actions/checkout@');

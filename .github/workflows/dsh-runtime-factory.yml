@@ -72,6 +72,7 @@ jobs:
             if ($releaseError -notmatch '404|Not Found') { throw "Unable to read candidate Release: $releaseError" }
             $releaseJson = $null
           }
+          $LASTEXITCODE = 0
           if ($releaseJson) {
             $release = $releaseJson | ConvertFrom-Json
             if ($release.tag_name -ne $tag) { throw "Release tag mismatch: $($release.tag_name)" }
@@ -342,7 +343,7 @@ jobs:
             - Remote publish: $env:REMOTE_PUBLISH
             - Remote verify: $env:REMOTE_VERIFY
             - Status: WAITING_FOR_PROMOTION
-            "@
+          "@
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
             @{ version=$env:RUNTIME_VERSION; sourceTag=$env:SOURCE_TAG; sourceCommit=$env:SOURCE_COMMIT; artifactVersion=$env:ARTIFACT_VERSION; sha256=$env:ARTIFACT_SHA256; sizeBytes=$env:ARTIFACT_SIZE; remotePublish=$env:REMOTE_PUBLISH; remoteVerify=$env:REMOTE_VERIFY; status='WAITING_FOR_PROMOTION' } | ConvertTo-Json | Set-Content artifacts/factory-metadata.json
           } else {
