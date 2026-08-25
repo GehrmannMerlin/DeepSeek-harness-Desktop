@@ -64,7 +64,7 @@ async function walkFiles(root, current = '') {
   return files;
 }
 
-async function cloneMaterializedTree(source, destination) {
+async function cloneMaterializedTree(source, destination, state) {
   const entries = (await fsp.readdir(source, { withFileTypes: true }))
     .sort((left, right) => left.name.localeCompare(right.name));
   await fsp.mkdir(destination, { recursive: true });
@@ -72,43 +72,47 @@ async function cloneMaterializedTree(source, destination) {
     const sourceEntry = path.join(source, entry.name);
     const destinationEntry = path.join(destination, entry.name);
     if (entry.isDirectory()) {
-      await cloneMaterializedTree(sourceEntry, destinationEntry);
+      await cloneMaterializedTree(sourceEntry, destinationEntry, state);
     } else if (entry.isFile()) {
       await fsp.mkdir(path.dirname(destinationEntry), { recursive: true });
-      try {
-        await fsp.link(sourceEntry, destinationEntry);
-      } catch (error) {
-        if (error.code === 'EEXIST') continue;
-        await fsp.copyFile(sourceEntry, destinationEntry);
+      if (state.hardLinksEnabled) {
+        try {
+          await fsp.link(sourceEntry, destinationEntry);
+          continue;
+        } catch (error) {
+          if (error.code === 'EEXIST') continue;
+          state.hardLinksEnabled = false;
+        }
       }
+      await fsp.copyFile(sourceEntry, destinationEntry);
     } else {
       throw new Error(`Factory materialized cache contains an unsupported file: ${sourceEntry}`);
     }
   }
 }
 
-async function copyTree(source, destination, active = new Set(), materialized = new Map()) {
+async function copyTree(source, destination, active = new Set(), state = { materialized: new Map(), hardLinksEnabled: true }) {
   const realSource = await fsp.realpath(source);
   const stat = await fsp.lstat(source);
   if (stat.isSymbolicLink()) {
     if (active.has(realSource)) return;
-    return copyTree(realSource, destination, active, materialized);
+    return copyTree(realSource, destination, active, state);
   }
   if (active.has(realSource)) throw new Error(`Factory source contains a recursive link: ${source}`);
-  const cachedDestination = materialized.get(realSource);
+  const cachedDestination = state.materialized.get(realSource);
   if (cachedDestination) {
-    await cloneMaterializedTree(cachedDestination, destination);
+    await cloneMaterializedTree(cachedDestination, destination, state);
     return;
   }
   active.add(realSource);
-  materialized.set(realSource, destination);
+  state.materialized.set(realSource, destination);
   try {
     if (stat.isDirectory()) {
       await fsp.mkdir(destination, { recursive: true });
       const entries = (await fsp.readdir(source, { withFileTypes: true }))
         .filter((entry) => !(path.basename(source) === 'node_modules' && (entry.name === '.pnpm' || entry.name === '.pnpm-workspace-state-v1.json')))
         .sort((left, right) => left.name.localeCompare(right.name));
-      for (const entry of entries) await copyTree(path.join(source, entry.name), path.join(destination, entry.name), active, materialized);
+      for (const entry of entries) await copyTree(path.join(source, entry.name), path.join(destination, entry.name), active, state);
       return;
     }
     if (!stat.isFile()) throw new Error(`Factory source contains an unsupported file: ${source}`);

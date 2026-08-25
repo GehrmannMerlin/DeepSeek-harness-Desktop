@@ -105,11 +105,14 @@ test('factory falls back to copying when Windows cannot create a materialized ha
     const destination = path.join(root, 'destination');
     await fs.mkdir(shared, { recursive: true });
     await fs.writeFile(path.join(shared, 'payload.txt'), 'shared payload\n', 'utf8');
+    await fs.writeFile(path.join(shared, 'second-payload.txt'), 'second shared payload\n', 'utf8');
     await fs.symlink(shared, path.join(source, 'first'), process.platform === 'win32' ? 'junction' : 'dir');
     await fs.symlink(shared, path.join(source, 'second'), process.platform === 'win32' ? 'junction' : 'dir');
 
     const originalLink = fs.link;
+    let linkAttemptCount = 0;
     fs.link = async () => {
+      linkAttemptCount += 1;
       const error = new Error('hard links are unavailable in this fixture');
       error.code = 'UNKNOWN';
       throw error;
@@ -122,5 +125,6 @@ test('factory falls back to copying when Windows cannot create a materialized ha
 
     assert.equal(await fs.readFile(path.join(destination, 'first', 'payload.txt'), 'utf8'), 'shared payload\n');
     assert.equal(await fs.readFile(path.join(destination, 'second', 'payload.txt'), 'utf8'), 'shared payload\n');
+    assert.equal(linkAttemptCount, 1);
   });
 });
