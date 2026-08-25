@@ -130,6 +130,11 @@ async function verifyRemoteCandidate({
   let archivePath;
   let extractionRoot;
   let primaryError = null;
+  const owned = {
+    archivePart: false,
+    archivePath: false,
+    stagingRoot: false,
+  };
   try {
     if (typeof tempRoot !== 'string' || tempRoot.length === 0) throw codedError('REMOTE_CANDIDATE_INVALID', 'tempRoot is required');
     validateCandidate(candidate);
@@ -144,6 +149,9 @@ async function verifyRemoteCandidate({
     archivePath = path.join(stagingRoot, 'artifact.zip');
     extractionRoot = path.join(stagingRoot, 'extracted');
     await fsp.mkdir(stagingRoot, { recursive: true });
+    owned.archivePart = true;
+    owned.archivePath = true;
+    owned.stagingRoot = true;
     let observed;
     try {
       observed = await download(candidate.artifactUrl, archivePart, { timeoutMs });
@@ -195,10 +203,9 @@ async function verifyRemoteCandidate({
     throw primaryError;
   } finally {
     const cleanupTargets = [
-      [archivePart, { force: true }],
-      [archivePath, { force: true }],
-      [stagingRoot, { recursive: true, force: true }],
-      [tempRoot, { recursive: true, force: true }],
+      [owned.archivePart && archivePart, { force: true }],
+      [owned.archivePath && archivePath, { force: true }],
+      [owned.stagingRoot && stagingRoot, { recursive: true, force: true }],
     ].filter(([target]) => typeof target === 'string');
     const cleanupErrors = [];
     for (const [target, options] of cleanupTargets) {

@@ -102,14 +102,16 @@ test('rejects HTTP 404 before extraction', async () => {
 
 test('rejects timeout and cleans the task staging root', async () => {
   const tempRoot = await makeRoot();
+  let archivePart;
   try {
     await assert.rejects(() => verifyRemoteCandidate({
       candidate: makeCandidate(),
-      download: async () => { const error = new Error('timed out'); error.code = 'ETIMEDOUT'; throw error; },
+      download: async (_url, destination) => { archivePart = destination; const error = new Error('timed out'); error.code = 'ETIMEDOUT'; throw error; },
       extractZip: async () => { throw new Error('must not extract'); },
       verifyRuntime: async () => ({ ok: true }), smoke: async () => ({ ok: true }), tempRoot,
     }), error => error.code === 'REMOTE_ARTIFACT_TIMEOUT');
-    await assert.rejects(fs.access(tempRoot));
+    assert.equal(await fs.stat(tempRoot).then(() => true), true);
+    await assert.rejects(fs.access(path.dirname(archivePart)));
   } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
 });
 
@@ -190,6 +192,27 @@ test('rejects an invalid artifact URL with a coded verification error before dow
   } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
 });
 
+test('preserves a caller-owned tempRoot and sentinel on invalid candidate or URL preconditions', async () => {
+  for (const [candidate, code] of [
+    [makeCandidate({ sha256: 'not-a-sha' }), 'REMOTE_CANDIDATE_INVALID'],
+    [makeCandidate({ artifactUrl: 'http://updates.example.test/runtime.zip' }), 'REMOTE_ARTIFACT_URL_INVALID'],
+  ]) {
+    const tempRoot = await makeRoot();
+    const sentinel = path.join(tempRoot, 'caller-owned-sentinel.txt');
+    await fs.writeFile(sentinel, 'must survive');
+    try {
+      await assert.rejects(() => verifyRemoteCandidate({
+        candidate,
+        download: async () => { throw new Error('must not download'); },
+        extractZip: async () => { throw new Error('must not extract'); },
+        verifyRuntime: async () => ({ ok: true }), smoke: async () => ({ ok: true }), tempRoot,
+      }), error => error.code === code);
+      assert.equal(await fs.readFile(sentinel, 'utf8'), 'must survive');
+      assert.equal(await fs.stat(tempRoot).then(() => true), true);
+    } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
+  }
+});
+
 test('cleanup attempts every path and preserves the original verification error when rm fails', async (t) => {
   const tempRoot = await makeRoot();
   const rmCalls = [];
@@ -204,11 +227,11 @@ test('cleanup attempts every path and preserves the original verification error 
       candidate: makeCandidate(), download: async () => { throw Object.assign(new Error('download failed'), { code: 'REMOTE_DOWNLOAD_FAILED' }); },
       extractZip: async () => {}, verifyRuntime: async () => ({ ok: true }), smoke: async () => ({ ok: true }), tempRoot,
     }), error => error.code === 'REMOTE_DOWNLOAD_FAILED');
-    assert.equal(rmCalls.length, 4);
+    assert.equal(rmCalls.length, 3);
     assert.equal(rmCalls[0].options.force, true);
     assert.equal(rmCalls[1].options.force, true);
     assert.equal(rmCalls[2].options.recursive, true);
-    assert.equal(rmCalls[3].target, tempRoot);
+    assert.notEqual(rmCalls.some(({ target }) => target === tempRoot), true);
   } finally {
     t.mock.restoreAll();
     await originalRm(tempRoot, { recursive: true, force: true });
