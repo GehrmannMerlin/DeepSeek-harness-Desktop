@@ -1,0 +1,198 @@
+name: DSH Runtime Stable Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact candidate runtime version to promote or roll back to
+        required: true
+        type: string
+      operation:
+        description: Select a stable-index promotion or rollback
+        required: true
+        type: choice
+        options:
+          - promote
+          - rollback
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: dsh-runtime-stable-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    env:
+      RUNTIME_PLATFORM: win32
+      RUNTIME_ARCH: x64
+      RUNTIME_VERSION: ${{ inputs.version }}
+      RUNTIME_OPERATION: ${{ inputs.operation }}
+    steps:
+      - name: Checkout distribution code
+        uses: actions/checkout@v4
+
+      - name: Read and download exact candidate Release
+        id: candidate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:RUNTIME_VERSION
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') { throw "Version is not an exact SemVer: $version" }
+          if ($env:RUNTIME_OPERATION -notin @('promote', 'rollback')) { throw "Unsupported operation: $env:RUNTIME_OPERATION" }
+
+          $tag = "dsh-runtime-v$version"
+          $zipName = "dsh-runtime-$version-$env:RUNTIME_PLATFORM-$env:RUNTIME_ARCH.zip"
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw "Candidate Release does not exist: $tag" }
+          $release = $releaseJson | ConvertFrom-Json
+          if ($release.tag_name -ne $tag -or $release.draft -ne $false -or $release.prerelease -ne $true) { throw 'Candidate Release must be a published prerelease' }
+
+          $zipAsset = @($release.assets | Where-Object { $_.name -eq $zipName })
+          $indexAsset = @($release.assets | Where-Object { $_.name -eq 'runtime-index.json' })
+          if ($zipAsset.Count -ne 1 -or $indexAsset.Count -ne 1) { throw 'Candidate Release must contain exactly one ZIP and runtime-index.json' }
+
+          $root = Join-Path $env:RUNNER_TEMP "dsh-runtime-promotion-$version-$env:RUNTIME_OPERATION"
+          $candidateDirectory = Join-Path $root "candidates/candidate-$version"
+          $downloadDirectory = Join-Path $root downloads
+          New-Item -ItemType Directory -Force $candidateDirectory, $downloadDirectory | Out-Null
+          $zipPath = Join-Path $downloadDirectory $zipName
+          $indexPath = Join-Path $downloadDirectory runtime-index.json
+          Invoke-WebRequest -Uri $zipAsset[0].browser_download_url -OutFile $zipPath
+          Invoke-WebRequest -Uri $indexAsset[0].browser_download_url -OutFile $indexPath
+
+          $index = Get-Content $indexPath -Raw | ConvertFrom-Json
+          if ($index.schemaVersion -ne 1 -or @($index.artifacts).Count -ne 1) { throw 'Candidate runtime-index.json must be schema v1 with one artifact' }
+          $entry = $index.artifacts[0]
+          $expectedArtifactUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$zipName"
+          if ($entry.packageName -ne '@deepseek-ai/dsh' -or $entry.version -ne $version -or $entry.platform -ne $env:RUNTIME_PLATFORM -or $entry.arch -ne $env:RUNTIME_ARCH) { throw 'Candidate target or version does not match the requested runtime' }
+          if ($entry.artifactUrl -ne $expectedArtifactUrl -or $entry.artifactUrl -notmatch '^https://') { throw 'Candidate artifact URL is not the exact production Release URL' }
+          if ($entry.sha256 -notmatch '^[a-f0-9]{64}$' -or $entry.sizeBytes -le 0) { throw 'Candidate SHA-256 or size is invalid' }
+          $zipHash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipSize = (Get-Item $zipPath).Length
+          if ($zipHash -ne $entry.sha256.ToLowerInvariant() -or $zipSize -ne $entry.sizeBytes) { throw 'Candidate ZIP does not match runtime-index.json' }
+
+          $sourceTag = [regex]::Match([string]$release.body, 'SOURCE_TAG=(dsh-v[^\r\n ]+)')
+          $sourceCommit = [regex]::Match([string]$release.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
+          if (-not $sourceTag.Success -or -not $sourceCommit.Success -or $sourceTag.Groups[1].Value -ne "dsh-v$version") { throw 'Candidate provenance is missing or does not match the requested version' }
+          $manifest = $entry.manifest | ConvertTo-Json -Depth 20
+          $provenanceObject = [ordered]@{ sourceTag = $sourceTag.Groups[1].Value; sourceCommit = $sourceCommit.Groups[1].Value; releaseTag = $tag }
+          $provenance = $provenanceObject | ConvertTo-Json -Depth 20
+          Copy-Item $zipPath (Join-Path $candidateDirectory $zipName)
+          Set-Content -Path (Join-Path $candidateDirectory runtime-manifest.json) -Value $manifest -Encoding utf8NoBOM
+          Set-Content -Path (Join-Path $candidateDirectory factory-provenance.json) -Value $provenance -Encoding utf8NoBOM
+          Set-Content -Path (Join-Path $candidateDirectory "$zipName.sha256") -Value "$($entry.sha256.ToLowerInvariant())  $zipName" -Encoding utf8NoBOM
+          $descriptor = [ordered]@{
+            schemaVersion = 1
+            packageName = $entry.packageName
+            version = $entry.version
+            platform = $entry.platform
+            arch = $entry.arch
+            artifactUrl = $entry.artifactUrl
+            sizeBytes = [int64]$entry.sizeBytes
+            sha256 = $entry.sha256.ToLowerInvariant()
+            manifest = $entry.manifest
+            provenance = $provenanceObject
+            status = 'CANDIDATE_PUBLISHED'
+          }
+          $descriptor | ConvertTo-Json -Depth 30 | Set-Content -Path (Join-Path $candidateDirectory candidate-runtime-index.json) -Encoding utf8NoBOM
+          "DISTRIBUTION_ROOT=$root" >> $env:GITHUB_ENV
+          "PAGES_ROOT=$(Join-Path $root pages)" >> $env:GITHUB_ENV
+          "CANDIDATE_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Re-download and verify the candidate artifact remotely
+        id: remote
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "dsh-runtime-v$env:CANDIDATE_VERSION"
+          $zipName = "dsh-runtime-$env:CANDIDATE_VERSION-$env:RUNTIME_PLATFORM-$env:RUNTIME_ARCH.zip"
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          $asset = @($release.assets | Where-Object { $_.name -eq $zipName })
+          if ($asset.Count -ne 1) { throw 'Remote candidate ZIP is missing or duplicated' }
+          $remoteRoot = Join-Path $env:RUNNER_TEMP "dsh-runtime-remote-verify-$env:CANDIDATE_VERSION"
+          New-Item -ItemType Directory -Force $remoteRoot | Out-Null
+          $remoteZip = Join-Path $remoteRoot $zipName
+          Invoke-WebRequest -Uri $asset[0].browser_download_url -OutFile $remoteZip
+          $descriptor = Get-Content (Join-Path $env:DISTRIBUTION_ROOT "candidates/candidate-$env:CANDIDATE_VERSION/candidate-runtime-index.json") -Raw | ConvertFrom-Json
+          $hash = (Get-FileHash $remoteZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size = (Get-Item $remoteZip).Length
+          if ($hash -ne $descriptor.sha256 -or $size -ne $descriptor.sizeBytes) { throw 'Remote candidate ZIP verification failed' }
+          if ($descriptor.artifactUrl -notmatch '^https://' -or $descriptor.platform -ne 'win32' -or $descriptor.arch -ne 'x64') { throw 'Remote candidate target or URL verification failed' }
+          "REMOTE_VERIFY_STATUS=REMOTE_VERIFIED" >> $env:GITHUB_ENV
+
+      - name: Preserve the old stable index before replacement
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtimeRoot = Join-Path $env:DISTRIBUTION_ROOT runtime
+          $stableDirectory = Join-Path $runtimeRoot stable
+          $historyDirectory = Join-Path $runtimeRoot history
+          New-Item -ItemType Directory -Force $stableDirectory, $historyDirectory | Out-Null
+          $previousPath = Join-Path $stableDirectory runtime-index.json
+          $pagesBase = "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          try {
+            Invoke-WebRequest -Uri "$pagesBase/runtime/stable/runtime-index.json" -OutFile $previousPath
+            $previous = Get-Content $previousPath -Raw | ConvertFrom-Json
+            if ($previous.schemaVersion -ne 1 -or @($previous.artifacts).Count -ne 1) { throw 'Existing stable index is not schema v1' }
+            $previousVersion = $previous.artifacts[0].version
+            $timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')
+            Copy-Item $previousPath (Join-Path $historyDirectory "$timestamp-$previousVersion.json")
+          } catch {
+            if (Test-Path $previousPath) { Remove-Item -LiteralPath $previousPath -Force }
+            if ($_.Exception.Message -notmatch '404|Not Found|404') { throw }
+          }
+
+      - name: Validate candidate and generate the stable index
+        id: stable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:REMOTE_VERIFY_STATUS -ne 'REMOTE_VERIFIED') { throw 'Stable index generation requires REMOTE_VERIFIED candidate state' }
+          $command = if ($env:RUNTIME_OPERATION -eq 'rollback') { 'rollback' } else { 'promote' }
+          $result = node scripts/runtime-distribution/runtime-distribution-cli.js $command --root $env:DISTRIBUTION_ROOT --version $env:CANDIDATE_VERSION 2>&1 | Tee-Object (Join-Path $env:DISTRIBUTION_ROOT stable-index.log) | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "Shared runtime distribution CLI failed: $result" }
+          $validation = @"
+          const fs = require('node:fs');
+          const { validateStableIndex } = require('./scripts/runtime-distribution/stable-index');
+          const index = JSON.parse(fs.readFileSync(process.env.DISTRIBUTION_ROOT + '/runtime/stable/runtime-index.json', 'utf8'));
+          validateStableIndex(index, { platform: 'win32', arch: 'x64' });
+          if (index.schemaVersion !== 1 || !Array.isArray(index.artifacts) || index.artifacts.length !== 1) throw new Error('final stable index is not schema v1 artifacts[]');
+          "@
+          node -e $validation
+
+      - name: Atomically stage the complete Pages artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Pages tree contract: runtime/history/<timestamp>-<version>.json
+          $stage = Join-Path $env:DISTRIBUTION_ROOT pages.tmp
+          $pages = $env:PAGES_ROOT
+          if (Test-Path $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+          if (Test-Path $pages) { Remove-Item -LiteralPath $pages -Recurse -Force }
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item (Join-Path $env:DISTRIBUTION_ROOT runtime) (Join-Path $stage runtime) -Recurse
+          $finalIndex = Join-Path $stage 'runtime/stable/runtime-index.json'
+          $final = Get-Content $finalIndex -Raw | ConvertFrom-Json
+          if ($final.schemaVersion -ne 1 -or @($final.artifacts).Count -ne 1) { throw 'Pages artifact stable index is not schema v1 artifacts[]' }
+          $historyFiles = @(Get-ChildItem (Join-Path $stage 'runtime/history') -Filter '*.json' -File)
+          if ($historyFiles.Count -lt 1) { throw 'Pages artifact must contain runtime/history JSON history' }
+          Move-Item -LiteralPath $stage -Destination $pages
+          if (-not (Test-Path (Join-Path $pages 'runtime/stable/runtime-index.json'))) { throw 'Pages tree is incomplete' }
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.PAGES_ROOT }}
+
+      - name: Deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@v4

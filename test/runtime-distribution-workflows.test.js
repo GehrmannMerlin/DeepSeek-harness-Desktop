@@ -2,14 +2,23 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { validateWorkflows } = require('../scripts/runtime-distribution/runtime-distribution-cli');
+const { createFileCandidateStore } = require('../scripts/runtime-distribution/candidate-store');
+const { buildStableIndex, promoteStable } = require('../scripts/runtime-distribution/stable-index');
 
 const WORKFLOW = path.join(__dirname, '..', '.github', 'workflows', 'dsh-runtime-factory.yml');
+const PROMOTION_WORKFLOW = path.join(__dirname, '..', '.github', 'workflows', 'dsh-runtime-promote.yml');
 
 function workflowText() {
   return fs.readFileSync(WORKFLOW, 'utf8');
+}
+
+function promotionWorkflowText() {
+  return fs.readFileSync(PROMOTION_WORKFLOW, 'utf8');
 }
 
 test('Windows runtime factory workflow has the required triggers and immutable toolchain', () => {
@@ -152,7 +161,123 @@ test('Windows runtime factory has no stable-index mutation or recursive workflow
   assert.doesNotMatch(text, /auto.?install|client.*install/i);
 });
 
+test('manual runtime promotion workflow has only the required dispatch inputs and permissions', () => {
+  const text = promotionWorkflowText();
+  assert.match(text, /workflow_dispatch:/);
+  assert.match(text, /version:\s*\n\s*description:[^\n]*\n\s*required:\s*true/);
+  assert.match(text, /operation:\s*\n\s*description:[^\n]*\n\s*required:\s*true[\s\S]*?type:\s*choice[\s\S]*?options:\s*\n\s*-\s*promote\s*\n\s*-\s*rollback/);
+  assert.doesNotMatch(text, /^\s*(?:push|release|workflow_run|schedule):/m);
+  assert.match(text, /permissions:\s*[\s\S]*contents:\s*read/);
+  assert.match(text, /permissions:\s*[\s\S]*pages:\s*write/);
+  assert.match(text, /permissions:\s*[\s\S]*id-token:\s*write/);
+  assert.doesNotMatch(text, /contents:\s*write/);
+});
+
+test('manual runtime promotion reads the exact candidate Release and verifies shared artifacts remotely before stable-index generation', () => {
+  const text = promotionWorkflowText();
+  const candidateRead = text.indexOf('releases/tags/');
+  const candidateDownload = text.indexOf('browser_download_url');
+  const remoteVerify = text.search(/REMOTE_VERIFIED|remote-verification|verifyRemoteCandidate/i);
+  const stableIndex = text.search(/Validate candidate and generate the stable index|stable-index\.js|runtime-distribution-cli\.js/);
+  assert.ok(candidateRead >= 0, 'workflow must read the exact candidate Release');
+  assert.ok(candidateDownload >= 0, 'workflow must download candidate Release assets');
+  assert.ok(candidateRead < candidateDownload, 'Release metadata must be read before asset download');
+  assert.ok(remoteVerify >= 0, 'workflow must perform remote re-download verification');
+  assert.ok(stableIndex >= 0, 'workflow must use the shared stable-index path');
+  assert.ok(remoteVerify < stableIndex, 'remote verification must precede stable-index generation');
+  assert.match(text, /candidate-runtime-index\.json|candidate.*manifest|runtime-manifest\.json/i);
+  assert.match(text, /factory-provenance\.json|provenance/i);
+  assert.match(text, /Get-FileHash|sha256/i);
+  assert.match(text, /win32/);
+  assert.match(text, /x64/);
+  assert.match(text, /artifactUrl/);
+});
+
+test('manual runtime promotion uses promotion and rollback without rebuilding, dependency installation, or contents write', () => {
+  const text = promotionWorkflowText();
+  assert.match(text, /operation.*promote|promote.*operation/is);
+  assert.match(text, /operation.*rollback|rollback.*operation/is);
+  assert.match(text, /rollbackStable|runtime-distribution-cli\.js\s+rollback|--operation\s+rollback|command.*rollback/i);
+  assert.doesNotMatch(text, /build-verified-runtime-artifact|buildVerifiedRuntimeArtifact|(?:\bFactory\b.*(?:build|invoke)|(?:build|invoke).*\bFactory\b)/i);
+  assert.doesNotMatch(text, /npm\s+(?:install|ci)|pnpm\s+install|dependency-resolution|auto.?install|client.*install/i);
+  assert.doesNotMatch(text, /contents:\s*write/);
+  assert.match(text, /remote-verified|REMOTE_VERIFIED|verified candidate/i);
+});
+
+test('manual runtime promotion builds and atomically publishes the complete Pages tree once', () => {
+  const text = promotionWorkflowText();
+  assert.match(text, /runtime[\\/]stable[\\/]runtime-index\.json/);
+  assert.match(text, /runtime[\\/]history[\\/].*\.json|runtimeRoot.*history.*timestamp.*version/i);
+  assert.match(text, /history.*stable|stable.*history/i);
+  assert.match(text, /schemaVersion\s*[-=]?[>=]*\s*1|schemaVersion.*1/);
+  assert.match(text, /artifacts/);
+  assert.match(text, /runtime-index\.json\.tmp|atomic|Move-Item|rename/i);
+  assert.match(text, /actions\/upload-pages-artifact@/);
+  assert.match(text, /actions\/deploy-pages@/);
+  assert.equal((text.match(/actions\/deploy-pages@/g) || []).length, 1, 'Pages must deploy exactly once');
+  assert.equal((text.match(/actions\/upload-pages-artifact@/g) || []).length, 1, 'Pages artifact must upload exactly once');
+});
+
+test('invalid local promotion candidate leaves the prior stable index bytes unchanged', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-runtime-promotion-fixture-'));
+  try {
+    const candidateRoot = path.join(root, 'candidates');
+    const indexPath = path.join(root, 'runtime', 'stable', 'runtime-index.json');
+    const historyDirectory = path.join(root, 'runtime', 'history');
+    const bytes = Buffer.from('valid-runtime-candidate');
+    const candidate = {
+      packageName: '@deepseek-ai/dsh',
+      version: '0.1.1-rc.2',
+      platform: 'win32',
+      arch: 'x64',
+      artifactUrl: 'https://github.com/example/releases/download/dsh-runtime-v0.1.1-rc.2/dsh-runtime-0.1.1-rc.2-win32-x64.zip',
+      sizeBytes: bytes.length,
+      sha256: require('node:crypto').createHash('sha256').update(bytes).digest('hex'),
+      manifest: {
+        schemaVersion: 1,
+        packageName: '@deepseek-ai/dsh',
+        version: '0.1.1-rc.2',
+        platform: 'win32',
+        arch: 'x64',
+        cliEntry: 'runtime-root/apps/cli/dist/index.js',
+      },
+      provenance: { sourceTag: 'dsh-v0.1.1-rc.2', sourceCommit: 'a'.repeat(40) },
+      status: 'CANDIDATE_PUBLISHED',
+    };
+    const zipPath = path.join(root, 'candidate.zip');
+    await fsp.writeFile(zipPath, bytes);
+    const store = createFileCandidateStore({ root: candidateRoot });
+    await store.publish({ ...candidate, zipPath });
+    const previousVersion = '0.1.0-rc.7';
+    const previous = buildStableIndex({ candidate: {
+      ...candidate,
+      version: previousVersion,
+      artifactUrl: `https://github.com/example/releases/download/dsh-runtime-v${previousVersion}/dsh-runtime-${previousVersion}-win32-x64.zip`,
+      manifest: { ...candidate.manifest, version: previousVersion },
+    } });
+    await fsp.mkdir(path.dirname(indexPath), { recursive: true });
+    await fsp.writeFile(indexPath, `${JSON.stringify(previous, null, 2)}\n`, 'utf8');
+    const before = await fsp.readFile(indexPath);
+    const descriptorPath = path.join(candidateRoot, 'candidate-0.1.1-rc.2', 'runtime-manifest.json');
+    await fsp.writeFile(descriptorPath, JSON.stringify({ ...candidate.manifest, version: '0.1.1-rc.2-invalid' }), 'utf8');
+
+    await assert.rejects(
+      promoteStable({
+        candidateStore: store,
+        candidateVersion: candidate.version,
+        remoteVerifier: async () => ({ status: 'REMOTE_VERIFIED' }),
+        indexPath,
+        historyDirectory,
+      }),
+      /candidate metadata is invalid|manifest/i,
+    );
+    assert.deepEqual(await fsp.readFile(indexPath), before);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('distribution workflow validation discovers YAML workflow files', async () => {
   const result = await validateWorkflows({ root: path.join(__dirname, '..') });
-  assert.deepEqual(result, { valid: true, workflows: ['dsh-runtime-factory.yml'] });
+  assert.deepEqual(result, { valid: true, workflows: ['dsh-runtime-factory.yml', 'dsh-runtime-promote.yml'] });
 });
