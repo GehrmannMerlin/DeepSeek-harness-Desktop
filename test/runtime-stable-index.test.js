@@ -78,6 +78,25 @@ test('validateStableIndex rejects malformed schema, missing artifacts, wrong tar
   }
 });
 
+test('buildStableIndex and validateStableIndex reject v-prefixed and non-canonical versions', () => {
+  const prefixed = candidate('v0.1.1', { manifest: { ...manifest, version: 'v0.1.1' } });
+  assert.throws(() => buildStableIndex({ candidate: prefixed, artifactUrl: prefixed.artifactUrl }));
+  assert.throws(() => validateStableIndex({
+    schemaVersion: 1,
+    artifacts: [{
+      packageName: prefixed.packageName,
+      version: prefixed.version,
+      platform: prefixed.platform,
+      arch: prefixed.arch,
+      artifactUrl: prefixed.artifactUrl,
+      sizeBytes: prefixed.sizeBytes,
+      sha256: prefixed.sha256,
+      manifest: prefixed.manifest,
+    }],
+  }));
+  assert.equal(buildStableIndex({ candidate: candidate('0.1.1'), artifactUrl: candidate('0.1.1').artifactUrl }).artifacts[0].version, '0.1.1');
+});
+
 test('writeStableIndexAtomic preserves the previous index when writing fails', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'stable-index-'));
   const indexPath = path.join(root, 'runtime-index.json');
@@ -90,6 +109,34 @@ test('writeStableIndexAtomic preserves the previous index when writing fails', a
     historyDirectory,
   }));
   assert.equal(await fs.readFile(indexPath, 'utf8'), '{"previous":true}\n');
+});
+
+test('history failure restores the previous index through a restore temp file and rename', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'stable-index-'));
+  const indexPath = path.join(root, 'runtime-index.json');
+  const historyDirectory = path.join(root, 'history');
+  const previous = '{"previous":"intact"}\n';
+  await fs.writeFile(indexPath, previous);
+  const renameCalls = [];
+  const fileSystem = {
+    ...require('node:fs/promises'),
+    async open(filePath, flags) {
+      if (filePath === indexPath) throw new Error('direct index restoration is not atomic');
+      return require('node:fs/promises').open(filePath, flags);
+    },
+    async mkdir(directory, options) {
+      if (directory === historyDirectory) throw new Error('injected history publication failure');
+      return require('node:fs/promises').mkdir(directory, options);
+    },
+    async rename(source, destination) {
+      renameCalls.push({ source, destination });
+      return require('node:fs/promises').rename(source, destination);
+    },
+  };
+  await assert.rejects(() => writeStableIndexAtomic({ indexPath, index: indexFor(), historyDirectory, fileSystem }));
+  assert.equal(await fs.readFile(indexPath, 'utf8'), previous);
+  assert.equal(renameCalls.filter(call => call.destination === indexPath).length, 2);
+  assert(renameCalls[1].source.includes('.restore-'));
 });
 
 test('writeStableIndexAtomic renames a complete JSON file before writing history', async () => {

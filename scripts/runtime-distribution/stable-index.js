@@ -4,7 +4,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = fs.promises;
 const path = require('node:path');
-const semver = require('semver');
 
 const {
   assertProductionHttpsUrl,
@@ -36,7 +35,9 @@ function validateEntry(entry, target) {
   try {
     assertProductionHttpsUrl(entry && entry.artifactUrl);
     const artifact = VerifiedRuntimeArtifact.fromIndexEntry(entry, target);
-    if (artifact.packageName !== PACKAGE_NAME || !semver.valid(artifact.version)) throw new Error('artifact identity is invalid');
+    if (artifact.packageName !== PACKAGE_NAME || normalizeExactVersion(artifact.version) !== artifact.version) {
+      throw new Error('artifact version must be an exact canonical SemVer');
+    }
     return artifact;
   } catch (error) {
     throw invalid(error.message, error);
@@ -72,8 +73,8 @@ function buildStableIndex({ candidate, artifactUrl = candidate && candidate.arti
   return validateStableIndex({ schemaVersion: ARTIFACT_SCHEMA_VERSION, artifacts: [entry] });
 }
 
-async function writeFileDurably(filePath, content) {
-  const handle = await fsp.open(filePath, 'w');
+async function writeFileDurably(filePath, content, fileSystem = fsp) {
+  const handle = await fileSystem.open(filePath, 'w');
   try {
     await handle.writeFile(content, 'utf8');
     await handle.sync();
@@ -87,39 +88,46 @@ function historyName(now, version) {
   return `${timestamp}-${normalizeExactVersion(version)}.json`;
 }
 
-async function readExisting(filePath) {
-  try { return await fsp.readFile(filePath); } catch (error) {
+async function readExisting(filePath, fileSystem = fsp) {
+  try { return await fileSystem.readFile(filePath); } catch (error) {
     if (error.code === 'ENOENT') return null;
     throw error;
   }
 }
 
-async function writeStableIndexAtomic({ indexPath, index, historyDirectory, now = () => new Date().toISOString() } = {}) {
+async function writeStableIndexAtomic({ indexPath, index, historyDirectory, now = () => new Date().toISOString(), fileSystem = fsp } = {}) {
   if (typeof indexPath !== 'string' || typeof historyDirectory !== 'string') throw new TypeError('indexPath and historyDirectory are required');
   if (typeof now !== 'function') throw new TypeError('now must be a function');
   const validated = validateStableIndex(index);
   const json = `${JSON.stringify(validated, null, 2)}\n`;
   const directory = path.dirname(indexPath);
   const temporaryPath = `${indexPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
-  const previous = await readExisting(indexPath);
+  const previous = await readExisting(indexPath, fileSystem);
   let renamed = false;
+  let restoreTemporaryPath;
   try {
-    await fsp.mkdir(directory, { recursive: true });
-    await writeFileDurably(temporaryPath, json);
-    await fsp.rename(temporaryPath, indexPath);
+    await fileSystem.mkdir(directory, { recursive: true });
+    await writeFileDurably(temporaryPath, json, fileSystem);
+    await fileSystem.rename(temporaryPath, indexPath);
     renamed = true;
-    await fsp.mkdir(historyDirectory, { recursive: true });
+    await fileSystem.mkdir(historyDirectory, { recursive: true });
     const historyPath = path.join(historyDirectory, historyName(now, validated.artifacts[0].version));
-    await writeFileDurably(historyPath, json);
+    await writeFileDurably(historyPath, json, fileSystem);
     return { indexPath, historyPath };
   } catch (error) {
     if (renamed) {
-      if (previous) await writeFileDurably(indexPath, previous);
-      else await fsp.rm(indexPath, { force: true });
+      if (previous) {
+        restoreTemporaryPath = `${indexPath}.restore-${process.pid}-${crypto.randomUUID()}`;
+        await writeFileDurably(restoreTemporaryPath, previous, fileSystem);
+        await fileSystem.rename(restoreTemporaryPath, indexPath);
+      } else {
+        await fileSystem.rm(indexPath, { force: true });
+      }
     }
     throw error;
   } finally {
-    await fsp.rm(temporaryPath, { force: true });
+    await fileSystem.rm(temporaryPath, { force: true });
+    if (restoreTemporaryPath) await fileSystem.rm(restoreTemporaryPath, { force: true });
   }
 }
 
