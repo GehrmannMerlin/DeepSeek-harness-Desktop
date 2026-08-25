@@ -44,6 +44,7 @@ jobs:
           "FACTORY_STATUS=not_run" >> $env:GITHUB_ENV
           "PUBLISH_STATUS=not_run" >> $env:GITHUB_ENV
           "REMOTE_VERIFY_STATUS=not_run" >> $env:GITHUB_ENV
+          "MARKER_STATUS=not_run" >> $env:GITHUB_ENV
           "CLI_STATUS=not_run" >> $env:GITHUB_ENV
           "WEB_STATUS=not_run" >> $env:GITHUB_ENV
           "HEALTH_STATUS=not_run" >> $env:GITHUB_ENV
@@ -97,6 +98,20 @@ jobs:
               if ($zipHash -ne $entry.sha256 -or $zipSize -ne $entry.sizeBytes) { throw 'Existing candidate ZIP identity conflicts with runtime-index.json' }
               $sourceCommitMatch = [regex]::Match($release.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
               if ($release.body -notmatch "SOURCE_TAG=dsh-v$version" -or -not $sourceCommitMatch.Success -or $sourceCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Existing candidate source/tag identity does not match the exact upstream tag commit' }
+              "CURRENT_PHASE=release-marker" >> $env:GITHUB_ENV
+              "MARKER_STATUS=running" >> $env:GITHUB_ENV
+              $marker = 'REMOTE_VERIFY=REMOTE_VERIFIED'
+              $existingBody = [string]$release.body
+              if ($existingBody -notmatch [regex]::Escape($marker)) {
+                $body = "$($existingBody.TrimEnd())`n$marker"
+                gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$($release.id)" --raw-field "body=$body" | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Unable to persist the remote verification marker on the candidate Release' }
+              }
+              $markedRelease = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+              $markedCommitMatch = [regex]::Match([string]$markedRelease.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
+              if ([string]$markedRelease.body -notmatch [regex]::Escape($marker) -or [string]$markedRelease.body -notmatch "SOURCE_TAG=dsh-v$version" -or -not $markedCommitMatch.Success -or $markedCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Candidate Release marker or source identity readback is invalid' }
+              "MARKER_STATUS=passed" >> $env:GITHUB_ENV
+              "REMOTE_VERIFY=REMOTE_VERIFIED" >> $env:GITHUB_ENV
               "VALIDATED_NOOP=true" >> $env:GITHUB_ENV
               "CANDIDATE_STATUS=VALIDATED_CANDIDATE_NOOP" >> $env:GITHUB_ENV
               "skip=true" >> $env:GITHUB_OUTPUT
@@ -278,13 +293,40 @@ jobs:
           "REMOTE_VERIFY=REMOTE_VERIFIED" >> $env:GITHUB_ENV
           "remote_status=passed" >> $env:GITHUB_OUTPUT
 
+      - name: Persist durable remote verification marker
+        id: marker
+        if: steps.resolve.outputs.skip != 'true' && steps.remote.outcome == 'success'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=release-marker" >> $env:GITHUB_ENV
+          "MARKER_STATUS=running" >> $env:GITHUB_ENV
+          $tag = "dsh-runtime-v$env:RUNTIME_VERSION"
+          $marker = 'REMOTE_VERIFY=REMOTE_VERIFIED'
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          $sourceCommitMatch = [regex]::Match([string]$release.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
+          if ([string]$release.body -notmatch "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" -or -not $sourceCommitMatch.Success -or $sourceCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Release source identity changed before marker persistence' }
+          $existingBody = [string]$release.body
+          if ($existingBody -notmatch [regex]::Escape($marker)) {
+            $body = "$($existingBody.TrimEnd())`n$marker"
+            gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$($release.id)" --raw-field "body=$body" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to persist the remote verification marker on the candidate Release' }
+          }
+          $markedRelease = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          $markedCommitMatch = [regex]::Match([string]$markedRelease.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
+          if ([string]$markedRelease.body -notmatch [regex]::Escape($marker) -or [string]$markedRelease.body -notmatch "SOURCE_TAG=dsh-v$env:RUNTIME_VERSION" -or -not $markedCommitMatch.Success -or $markedCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Release marker or source identity readback is invalid' }
+          "MARKER_STATUS=passed" >> $env:GITHUB_ENV
+          "REMOTE_VERIFY=REMOTE_VERIFIED" >> $env:GITHUB_ENV
+
       - name: Write failure-derived factory summary
         if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $isNoop = $env:VALIDATED_NOOP -eq 'true'
-          $allSucceeded = $env:FACTORY_STATUS -eq 'passed' -and $env:PUBLISH_STATUS -eq 'passed' -and $env:REMOTE_VERIFY_STATUS -eq 'passed' -and $env:CLI_STATUS -eq 'passed' -and $env:WEB_STATUS -eq 'passed' -and $env:HEALTH_STATUS -eq 'passed' -and $env:NATIVE_STATUS -eq 'passed'
+          $isNoop = $env:VALIDATED_NOOP -eq 'true' -and $env:REMOTE_VERIFY_STATUS -eq 'passed' -and $env:MARKER_STATUS -eq 'passed'
+          $allSucceeded = $env:FACTORY_STATUS -eq 'passed' -and $env:PUBLISH_STATUS -eq 'passed' -and $env:REMOTE_VERIFY_STATUS -eq 'passed' -and $env:MARKER_STATUS -eq 'passed' -and $env:CLI_STATUS -eq 'passed' -and $env:WEB_STATUS -eq 'passed' -and $env:HEALTH_STATUS -eq 'passed' -and $env:NATIVE_STATUS -eq 'passed'
           if ($isNoop) {
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## DSH Runtime Factory`n- Version: $env:RUNTIME_VERSION`n- Candidate: VALIDATED_CANDIDATE_NOOP`n- Remote verify: passed`n- Status: no-op; promotion state unchanged"
           } elseif ($allSucceeded) {
@@ -305,7 +347,7 @@ jobs:
             @{ version=$env:RUNTIME_VERSION; sourceTag=$env:SOURCE_TAG; sourceCommit=$env:SOURCE_COMMIT; artifactVersion=$env:ARTIFACT_VERSION; sha256=$env:ARTIFACT_SHA256; sizeBytes=$env:ARTIFACT_SIZE; remotePublish=$env:REMOTE_PUBLISH; remoteVerify=$env:REMOTE_VERIFY; status='WAITING_FOR_PROMOTION' } | ConvertTo-Json | Set-Content artifacts/factory-metadata.json
           } else {
             $failedPhase = if ($env:CURRENT_PHASE) { $env:CURRENT_PHASE } else { 'unknown' }
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## DSH Runtime Factory FAILED`n- Failed phase: $failedPhase`n- Factory: $env:FACTORY_STATUS`n- Publish: $env:PUBLISH_STATUS`n- Remote verify: $env:REMOTE_VERIFY_STATUS`n- Promotion readiness: NOT_READY"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## DSH Runtime Factory FAILED`n- Failed phase: $failedPhase`n- Factory: $env:FACTORY_STATUS`n- Publish: $env:PUBLISH_STATUS`n- Remote verify: $env:REMOTE_VERIFY_STATUS`n- Release marker: $env:MARKER_STATUS`n- Promotion readiness: NOT_READY"
           }
 
       - name: Upload factory logs and metadata only

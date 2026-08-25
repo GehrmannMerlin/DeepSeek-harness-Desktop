@@ -53,6 +53,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Candidate Release does not exist: $tag" }
           $release = $releaseJson | ConvertFrom-Json
           if ($release.tag_name -ne $tag -or $release.draft -ne $false -or $release.prerelease -ne $true) { throw 'Candidate Release must be a published prerelease' }
+          $priorVerificationMarker = 'REMOTE_VERIFY=REMOTE_VERIFIED'
+          if ($env:RUNTIME_OPERATION -eq 'rollback' -and [string]$release.body -notmatch [regex]::Escape($priorVerificationMarker)) { throw 'Rollback requires a prior REMOTE_VERIFY=REMOTE_VERIFIED marker in the candidate Release body' }
 
           $zipAsset = @($release.assets | Where-Object { $_.name -eq $zipName })
           $indexAsset = @($release.assets | Where-Object { $_.name -eq 'runtime-index.json' })

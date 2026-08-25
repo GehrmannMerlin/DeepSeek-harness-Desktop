@@ -8,7 +8,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { validateWorkflows } = require('../scripts/runtime-distribution/runtime-distribution-cli');
 const { createFileCandidateStore } = require('../scripts/runtime-distribution/candidate-store');
-const { buildStableIndex, promoteStable } = require('../scripts/runtime-distribution/stable-index');
+const { buildStableIndex, promoteStable, rollbackStable } = require('../scripts/runtime-distribution/stable-index');
 
 const WORKFLOW = path.join(__dirname, '..', '.github', 'workflows', 'dsh-runtime-factory.yml');
 const PROMOTION_WORKFLOW = path.join(__dirname, '..', '.github', 'workflows', 'dsh-runtime-promote.yml');
@@ -161,6 +161,21 @@ test('Windows runtime factory has no stable-index mutation or recursive workflow
   assert.doesNotMatch(text, /auto.?install|client.*install/i);
 });
 
+test('factory persists the remote verification marker only after complete remote readback and keeps failure summaries gated', () => {
+  const text = workflowText();
+  const remoteReadback = text.indexOf('Verify remote candidate metadata and ZIP readback');
+  const markerStep = text.indexOf('Persist durable remote verification marker');
+  const marker = text.indexOf('gh api --method PATCH', markerStep);
+  assert.ok(remoteReadback >= 0, 'factory must have a remote readback phase');
+  assert.ok(markerStep >= 0, 'factory must have a durable marker phase');
+  assert.ok(marker > remoteReadback, 'durable verification marker must be written after remote readback');
+  assert.match(text, /gh api[^\n]*(?:--method\s+PATCH|releases\/[^\n]*-X\s+PATCH)|gh release edit/i);
+  assert.match(text, /MARKER_STATUS/);
+  assert.match(text, /allSucceeded.*MARKER_STATUS|MARKER_STATUS.*allSucceeded/is);
+  assert.match(text, /(?:Release marker|marker).*MARKER_STATUS|MARKER_STATUS.*(?:Release marker|marker)/is);
+  assert.match(text, /verifiedRelease|markedRelease|marker.*body|body.*marker/i);
+});
+
 test('manual runtime promotion workflow has only the required dispatch inputs and permissions', () => {
   const text = promotionWorkflowText();
   assert.match(text, /workflow_dispatch:/);
@@ -191,6 +206,21 @@ test('manual runtime promotion reads the exact candidate Release and verifies sh
   assert.match(text, /win32/);
   assert.match(text, /x64/);
   assert.match(text, /artifactUrl/);
+});
+
+test('rollback requires the durable prior remote-verification marker before stable-index generation or Pages upload', () => {
+  const text = promotionWorkflowText();
+  const rollbackBranch = text.search(/RUNTIME_OPERATION[^\n]*rollback|operation[^\n]*rollback/i);
+  const marker = text.indexOf('REMOTE_VERIFY=REMOTE_VERIFIED');
+  const stable = text.indexOf('Validate candidate and generate the stable index');
+  const upload = text.indexOf('actions/upload-pages-artifact@');
+  assert.ok(rollbackBranch >= 0, 'workflow must branch on rollback operation');
+  assert.ok(marker >= 0, 'workflow must check the durable verification marker');
+  assert.ok(marker < stable, 'rollback marker gate must precede stable-index generation');
+  assert.ok(marker < upload, 'rollback marker gate must precede Pages upload');
+  assert.match(text, /rollback[^\n]*(?:REMOTE_VERIFY|REMOTE_VERIFIED)|(?:REMOTE_VERIFY|REMOTE_VERIFIED)[^\n]*rollback/i);
+  assert.match(text, /body.*REMOTE_VERIFY|REMOTE_VERIFY.*body/i);
+  assert.match(text, /throw[^\n]*(?:rollback|verified|marker)/i);
 });
 
 test('manual runtime promotion uses promotion and rollback without rebuilding, dependency installation, or contents write', () => {
@@ -272,6 +302,82 @@ test('invalid local promotion candidate leaves the prior stable index bytes unch
       /candidate metadata is invalid|manifest/i,
     );
     assert.deepEqual(await fsp.readFile(indexPath), before);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rollback fixture allows previously verified candidates, rejects never-verified candidates, and preserves prior index bytes', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-runtime-rollback-marker-'));
+  const marker = 'REMOTE_VERIFY=REMOTE_VERIFIED';
+  const version = '0.1.1-rc.2';
+  const previousVersion = '0.1.0-rc.7';
+  try {
+    const bytes = Buffer.from('rollback-runtime-candidate');
+    const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+    const makeCandidate = (candidateVersion) => ({
+      packageName: '@deepseek-ai/dsh',
+      version: candidateVersion,
+      platform: 'win32',
+      arch: 'x64',
+      artifactUrl: `https://github.com/example/releases/download/dsh-runtime-v${candidateVersion}/dsh-runtime-${candidateVersion}-win32-x64.zip`,
+      sizeBytes: bytes.length,
+      sha256,
+      manifest: {
+        schemaVersion: 1,
+        packageName: '@deepseek-ai/dsh',
+        version: candidateVersion,
+        platform: 'win32',
+        arch: 'x64',
+        cliEntry: 'runtime-root/apps/cli/dist/index.js',
+      },
+      provenance: { sourceTag: `dsh-v${candidateVersion}`, sourceCommit: 'b'.repeat(40) },
+      status: 'CANDIDATE_PUBLISHED',
+    });
+    const zipPath = path.join(root, 'candidate.zip');
+    await fsp.writeFile(zipPath, bytes);
+    const store = createFileCandidateStore({ root: path.join(root, 'candidates') });
+    await store.publish({ ...makeCandidate(version), zipPath });
+    await store.publish({ ...makeCandidate(previousVersion), zipPath });
+    const indexPath = path.join(root, 'runtime', 'stable', 'runtime-index.json');
+    const historyDirectory = path.join(root, 'runtime', 'history');
+    const previousIndex = buildStableIndex({ candidate: makeCandidate(previousVersion) });
+    await fsp.mkdir(path.dirname(indexPath), { recursive: true });
+    await fsp.writeFile(indexPath, `${JSON.stringify(previousIndex, null, 2)}\n`, 'utf8');
+    const beforeRejectedRollback = await fsp.readFile(indexPath);
+
+    const rollbackFixture = async (releaseBody) => {
+      if (!releaseBody.includes(marker)) {
+        throw new Error('rollback candidate lacks prior REMOTE_VERIFY marker');
+      }
+      return rollbackStable({
+        candidateStore: store,
+        targetVersion: version,
+        remoteVerifier: async () => ({ status: 'REMOTE_VERIFIED' }),
+        indexPath,
+        historyDirectory,
+      });
+    };
+
+    const promoted = await promoteStable({
+      candidateStore: store,
+      candidateVersion: version,
+      remoteVerifier: async () => ({ status: 'REMOTE_VERIFIED' }),
+      indexPath,
+      historyDirectory,
+    });
+    assert.equal(promoted.version, version, 'promotion remains allowed without a prior marker');
+    await fsp.writeFile(indexPath, beforeRejectedRollback);
+
+    const rollback = await rollbackFixture(`SOURCE_TAG=dsh-v${version}\n${marker}`);
+    assert.equal(rollback.version, version, 'previously remotely verified rollback is allowed');
+    await fsp.writeFile(indexPath, beforeRejectedRollback);
+
+    await assert.rejects(
+      rollbackFixture(`SOURCE_TAG=dsh-v${version}`),
+      /lacks prior REMOTE_VERIFY marker/,
+    );
+    assert.deepEqual(await fsp.readFile(indexPath), beforeRejectedRollback);
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }
