@@ -10,6 +10,8 @@
     "dev": "electron .",
     "icons": "node scripts/generate-icons.js",
     "test": "node --test \"test/*.test.js\"",
+    "distribution:dry-run": "node scripts/runtime-distribution/runtime-distribution-cli.js dry-run",
+    "distribution:validate-workflows": "node scripts/runtime-distribution/runtime-distribution-cli.js validate-workflows",
     "prepare:bundled-runtime": "node scripts/prepare-bundled-runtime.js",
     "pack": "npm run prepare:bundled-runtime && electron-builder --dir",
     "dist": "npm run prepare:bundled-runtime && electron-builder --win"
