@@ -214,3 +214,31 @@ Status remains: **BLOCKED**
 DO NOT MERGE. The npm installation route remains blocked, and the verified
 artifact route still lacks the real Desktop update/restart/rollback and
 packaging/NSIS evidence required by this gate.
+
+
+
+## Task 9 — Production Distribution evidence (2026-08-25)
+
+This section appends Task 9 evidence and intentionally preserves all historical material above.
+
+### Evidence classification
+
+| Area | Status | Evidence and limitation |
+| --- | --- | --- |
+| Local production-distribution implementation | PASS | The checked-in Factory/Promotion workflows, CLI, candidate store, remote verification, stable-index, promotion, and rollback implementation are present at baseline `2e33fcb3d931e2c1dd5456889b463708bb47f789`. |
+| Local dry run | PASS | Task 1–8 evidence records the deterministic dry-run and workflow-validation commands; Task 9 documentation does not reclassify this as remote deployment. |
+| Factory workflow definition | PASS | `.github/workflows/dsh-runtime-factory.yml` has Windows x64 Factory, exact tag/commit resolution, candidate Release reconciliation, remote readback, durable marker, and no stable mutation. |
+| Promotion workflow definition | PASS | `.github/workflows/dsh-runtime-promote.yml` is manual, validates exact candidates, requires the rollback marker, stages history, and deploys a complete Pages tree. |
+| Public repository/remote | PASS | Local `origin` is `https://github.com/GehrmannMerlin/DeepSeek-harness-Desktop`; read-only repository/Release/Actions page probes returned HTTP 200. |
+| Remote Releases state | BLOCKED | GitHub API returned HTTP 403 rate limit exceeded; no remote Release listing was independently established, and no Release mutation was attempted. |
+| Remote Pages state | BLOCKED | Expected stable index probe returned HTTP 404; GitHub API Pages inspection returned HTTP 403 rate limit exceeded; no Pages deployment was attempted. |
+| Remote Publish Gate authorization | AWAITING AUTHORIZATION | No explicit authorization or effective `contents: write`/Pages token verification was available for remote mutation. |
+| Remote asset inspection | NOT PERFORMED | No candidate Release was created or available for authorized readback in this task. |
+| Stable HTTPS index readback | NOT PERFORMED | No stable production URL is claimed or invented. |
+| Installed Desktop HTTPS E2E | NOT PERFORMED | No installed Desktop run against a real Pages URL, restart persistence, or production rollback was performed. |
+| Production zero npm/pnpm calls | NOT PERFORMED | Local implementation has the zero-call contract, but production installed E2E evidence is absent. |
+| Public RELEASE READY | BLOCKED | Remains **NO** pending real production HTTPS hosting, installed Desktop E2E, restart persistence, and zero npm calls. |
+
+### Gate decision
+
+Local implementation and dry-run evidence are separate from the Remote Publish Gate. The local rows do not authorize or imply a remote Release/Pages deployment. Overall status remains **BLOCKED**; no remote mutation was performed locally.
