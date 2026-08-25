@@ -167,6 +167,75 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
 
+      - name: Deploy isolated production DSH package
+        if: steps.resolve.outputs.skip != 'true'
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=runtime-deploy" >> $env:GITHUB_ENV
+          if (Test-Path factory-runtime) { Remove-Item -Recurse -Force factory-runtime }
+          pnpm --filter @deepseek-ai/dsh deploy --legacy factory-runtime
+          if (-not (Test-Path 'factory-runtime/package.json')) { throw 'Isolated DSH production package was not created' }
+
+      - name: Complete isolated DSH peer dependency closure
+        if: steps.resolve.outputs.skip != 'true'
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = @'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = process.cwd();
+          const runtime = path.join(root, 'factory-runtime');
+          const workspacePackages = new Map();
+          const packageFiles = [];
+          function walk(current) {
+            for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+              if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'factory-runtime') continue;
+              const absolute = path.join(current, entry.name);
+              if (entry.isDirectory()) walk(absolute);
+              else if (entry.isFile() && entry.name === 'package.json') packageFiles.push(absolute);
+            }
+          }
+          walk(root);
+          for (const file of packageFiles) {
+            const packageJson = JSON.parse(fs.readFileSync(file, 'utf8'));
+            if (packageJson.name) workspacePackages.set(packageJson.name, path.dirname(file));
+          }
+          const peers = new Set();
+          for (const file of packageFiles) {
+            const packageJson = JSON.parse(fs.readFileSync(file, 'utf8'));
+            for (const name of Object.keys(packageJson.peerDependencies || {})) peers.add(name);
+          }
+          let linked = 0;
+          for (const name of [...peers].sort()) {
+            const target = workspacePackages.get(name) || path.join(root, 'node_modules', ...name.split('/'));
+            const destination = path.join(runtime, 'node_modules', ...name.split('/'));
+            if (!fs.existsSync(target) || fs.existsSync(destination)) continue;
+            fs.mkdirSync(path.dirname(destination), { recursive: true });
+            fs.symlinkSync(target, destination, 'junction');
+            linked += 1;
+          }
+          const required = '@deepseek-ai/cordis-plugin-group';
+          if (!fs.existsSync(path.join(runtime, 'node_modules', ...required.split('/')))) {
+            throw new Error(`Required peer dependency was not materialized: ${required}`);
+          }
+          process.stdout.write(JSON.stringify({ linkedPeerDependencies: linked }) + '\n');
+          '@
+          $script | node -
+
+      - name: Smoke isolated production DSH CLI
+        if: steps.resolve.outputs.skip != 'true'
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = node factory-runtime/lib/bin.js --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "Isolated DSH CLI --version failed: $output" }
+          if ($output -notmatch [regex]::Escape($env:RUNTIME_VERSION)) { throw "Isolated DSH CLI version mismatch: $output" }
+
       - name: Verify upstream layout and exact package version
         if: steps.resolve.outputs.skip != 'true'
         shell: pwsh
@@ -198,7 +267,7 @@ jobs:
           "CURRENT_PHASE=factory" >> $env:GITHUB_ENV
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $url = "https://github.com/${{ github.repository }}/releases/download/dsh-runtime-v$env:RUNTIME_VERSION/dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
-          $resultText = node scripts/build-verified-runtime-artifact.js --source-runtime upstream/apps/cli --frontend-dist upstream/apps/web/dist --frontend-package-json upstream/apps/web/package.json --output artifacts --version $env:RUNTIME_VERSION --platform $env:RUNTIME_PLATFORM --arch $env:RUNTIME_ARCH --artifact-url $url --source-revision $env:SOURCE_COMMIT --pnpm-version $env:PNPM_VERSION 2>&1 | Tee-Object artifacts/factory.log | Out-String
+          $resultText = node scripts/build-verified-runtime-artifact.js --source-runtime upstream/factory-runtime --frontend-dist upstream/apps/web/dist --frontend-package-json upstream/apps/web/package.json --output artifacts --version $env:RUNTIME_VERSION --platform $env:RUNTIME_PLATFORM --arch $env:RUNTIME_ARCH --artifact-url $url --source-revision $env:SOURCE_COMMIT --pnpm-version $env:PNPM_VERSION 2>&1 | Tee-Object artifacts/factory.log | Out-String
           if ($LASTEXITCODE -ne 0) { throw 'Verified runtime Factory failed' }
           $result = $resultText | ConvertFrom-Json
           "FACTORY_STATUS=passed" >> $env:GITHUB_ENV
