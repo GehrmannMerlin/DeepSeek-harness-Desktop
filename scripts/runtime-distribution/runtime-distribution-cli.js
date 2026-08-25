@@ -145,9 +145,7 @@ async function runDryRun({ root, fixture = {}, now = () => new Date().toISOStrin
     verifyRuntime: async () => ({ ok: true }),
     smoke: async () => ({ ok: true }),
   }));
-  const candidateResult = detected.candidateStatus === 'ALREADY_PUBLISHED'
-    ? { status: 'ALREADY_PUBLISHED', candidate: await store.read(candidate.version) }
-    : await publishFixtureCandidate({ store, candidate, fixture, root });
+  const candidateResult = await publishFixtureCandidate({ store, candidate, fixture, root });
   const candidateReadback = await store.read(candidate.version);
   const remoteStatus = await remoteVerification({ candidate: candidateReadback });
   const promotionRemoteVerifier = async ({ candidate: value }) => {

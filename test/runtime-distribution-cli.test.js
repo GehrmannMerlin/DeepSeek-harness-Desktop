@@ -174,12 +174,35 @@ test('second dry run is ALREADY_PUBLISHED and remains a no-op without Factory or
     const fixture = makeFixture();
     let factoryCalls = 0;
     let npmCalls = 0;
+    const publishAttempts = [];
+    const publishStatuses = [];
+    const remoteCalls = [];
+    const actualStore = createFileCandidateStore({ root: path.join(root, 'candidates'), now: () => '2026-08-25T00:00:00.000Z' });
     fixture.factory = { async buildCandidate() { factoryCalls += 1; } };
     fixture.npmInstaller = { async install() { npmCalls += 1; }, getCallCount() { return npmCalls; } };
+    fixture.candidateStore = {
+      async publish(candidate) {
+        publishAttempts.push(candidate.version);
+        const result = await actualStore.publish(candidate);
+        publishStatuses.push({ version: candidate.version, status: result.status });
+        return result;
+      },
+      read: actualStore.read,
+    };
+    fixture.remoteVerification = async ({ candidate }) => {
+      remoteCalls.push(candidate.version);
+      return { status: 'REMOTE_VERIFIED', observedSize: candidate.sizeBytes, sha256: candidate.sha256 };
+    };
     const first = await runDryRun({ root, fixture, now: () => '2026-08-25T00:00:00.000Z', logger: { log() {} } });
     const second = await runDryRun({ root, fixture, now: () => '2026-08-25T00:00:00.000Z', logger: { log() {} } });
     assert.equal(first.candidatePublishStatus, 'PUBLISHED');
     assert.equal(second.candidatePublishStatus, 'ALREADY_PUBLISHED');
+    assert.deepEqual(publishAttempts.filter(version => version === '0.1.1-rc.2'), ['0.1.1-rc.2', '0.1.1-rc.2']);
+    assert.deepEqual(publishStatuses.filter(entry => entry.version === '0.1.1-rc.2').map(entry => entry.status), ['PUBLISHED', 'ALREADY_PUBLISHED']);
+    assert.deepEqual(remoteCalls, [
+      '0.1.1-rc.2', '0.1.0-rc.7',
+      '0.1.1-rc.2', '0.1.0-rc.7',
+    ]);
     assert.equal(factoryCalls, 0);
     assert.equal(npmCalls, 0);
     assert.equal(second.npmInstallCalls, 0);
