@@ -1,7 +1,7 @@
 'use strict';
 const { app, shell, Notification } = require('electron');
 const { HarnessProcessManager, STATUS } = require('../process/harness-process-manager');
-const { waitUntilReady, probe } = require('../health/harness-health-checker');
+const { waitUntilReady, probe, createReleaseE2eHealthChecker } = require('../health/harness-health-checker');
 const { MainWindow } = require('../window/main-window');
 const { TrayManager } = require('../tray/tray-manager');
 const { getLogger } = require('../utils/logger');
@@ -92,7 +92,12 @@ class AppLifecycle {
     // verified artifact selected by the immutable runtime index.
     this.installer = installer || null;
     this.verifier = verifier || { verify: verifyRuntime };
-    this.healthChecker = healthChecker || { waitUntilReady };
+    this.healthChecker = healthChecker || {
+      waitUntilReady: createReleaseE2eHealthChecker({
+        realChecker: waitUntilReady,
+        logger: this.appLogger,
+      }),
+    };
     this.updateManager = updateManager || new DshUpdateManager({
       runtimeManager: this.runtimeManager,
       registry: this.registry,

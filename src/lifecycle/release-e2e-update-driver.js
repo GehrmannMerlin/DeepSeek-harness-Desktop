@@ -14,6 +14,19 @@ function attachReleaseE2eUpdateDriver(lifecycle, { env = process.env } = {}) {
 
   let triggered = false;
   let detached = false;
+  let exitScheduled = false;
+
+  const scheduleExit = (snapshot) => {
+    const expectedState = env.DSH_RELEASE_E2E_EXIT_AFTER_STATE;
+    if (exitScheduled || !expectedState || !lifecycle.quit || !snapshot || snapshot.state !== expectedState) return;
+    exitScheduled = true;
+    const parsedDelay = Number(env.DSH_RELEASE_E2E_EXIT_DELAY_MS);
+    const delay = Number.isFinite(parsedDelay) && parsedDelay >= 0 ? parsedDelay : 0;
+    setTimeout(() => {
+      Promise.resolve(lifecycle.quit())
+        .catch((error) => log(lifecycle, 'error', `release_e2e_exit_failed ${error.message}`));
+    }, delay);
+  };
 
   const confirmFromRenderer = async (snapshot) => {
     if (detached || !lifecycle._openUpdateDialog) return;
@@ -40,6 +53,7 @@ function attachReleaseE2eUpdateDriver(lifecycle, { env = process.env } = {}) {
   };
 
   const onStateChange = ({ snapshot } = {}) => {
+    scheduleExit(snapshot);
     if (triggered || !snapshot || snapshot.state !== 'UPDATE_AVAILABLE') return;
     triggered = true;
     log(lifecycle, 'info', `release_e2e_update_confirm_started version=${snapshot.latest && snapshot.latest.version || 'unknown'}`);

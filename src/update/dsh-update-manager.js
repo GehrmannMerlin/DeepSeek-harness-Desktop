@@ -181,6 +181,13 @@ class DshUpdateManager extends EventEmitter {
   }
 
   async _checkForUpdates({ manual }) {
+    const operationId = this.snapshot.operationId && this.snapshot.state === STATES.UPDATE_AVAILABLE
+      ? this.snapshot.operationId
+      : this._newOperationId(null, {
+        installedVersion: this.snapshot.currentRuntime && this.snapshot.currentRuntime.version,
+        runtimeKind: this.snapshot.currentRuntime && this.snapshot.currentRuntime.kind,
+      });
+    this._patch({ operationId });
     this._transition(STATES.CHECKING, { error: null, progress: { phase: 'checking', version: null } });
     try {
       const currentRuntime = await this.runtimeManager.resolveCurrentRuntime();
@@ -188,6 +195,27 @@ class DshUpdateManager extends EventEmitter {
       const state = typeof this.runtimeManager.getState === 'function'
         ? await this.runtimeManager.getState()
         : { failedVersions: {} };
+      if (this.verifiedSource && typeof this.verifiedSource.isConfigured === 'function'
+        && !this.verifiedSource.isConfigured()) {
+        const error = {
+          message: '在线更新服务尚未配置',
+          code: 'VERIFIED_RUNTIME_SOURCE_NOT_CONFIGURED',
+          fatal: false,
+        };
+        this._logInfo('verified_runtime_source_not_configured');
+        this._transition(STATES.UP_TO_DATE, {
+          latest: null,
+          upstreamLatestVersion: null,
+          verifiedLatestVersion: null,
+          pending: Boolean(state && state.pending),
+          updateAvailable: false,
+          progress: null,
+          error: null,
+        });
+        this._completeOperation('SOURCE_NOT_CONFIGURED');
+        if (manual) this.emit('notification', { type: 'update-error', error, manual: true });
+        return this.getSnapshot();
+      }
       let upstreamLatest = null;
       let upstreamError = null;
       try {
@@ -223,6 +251,7 @@ class DshUpdateManager extends EventEmitter {
           updateAvailable: false,
           progress: null,
         });
+        this._completeOperation('UP_TO_DATE');
       }
     } catch (error) {
       return this._handleFailure(error, { manual });
@@ -234,7 +263,10 @@ class DshUpdateManager extends EventEmitter {
     if (this.snapshot.state !== STATES.UPDATE_AVAILABLE || !this.snapshot.latest) return this.getSnapshot();
 
     const latest = clone(this.snapshot.latest);
-    const operationId = this._newOperationId(latest.version);
+    const operationId = this.snapshot.operationId || this._newOperationId(latest.version, {
+      installedVersion: this.snapshot.currentRuntime && this.snapshot.currentRuntime.version,
+      runtimeKind: this.snapshot.currentRuntime && this.snapshot.currentRuntime.kind,
+    });
     const stagingRoot = path.join(this._runtimeRoot(), 'staging', `${latest.version}-${operationId}`);
     this._transition(STATES.PREPARING, {
       operationId,
@@ -455,11 +487,15 @@ class DshUpdateManager extends EventEmitter {
     this.newProcessStarted = true;
     const url = await this._waitForHarnessUrl();
     if (!url) throw makeError('New runtime did not expose a Harness URL', 'RUNTIME_URL_MISSING');
+    const healthOptions = {
+      runtime,
+      phase: 'post_activation_update_health',
+    };
     const check = typeof this.healthChecker === 'function'
-      ? await this.healthChecker(url)
+      ? await this.healthChecker(url, healthOptions)
       : await (this.healthChecker.waitUntilReady
-        ? this.healthChecker.waitUntilReady(url)
-        : this.healthChecker.check(url));
+        ? this.healthChecker.waitUntilReady(url, healthOptions)
+        : this.healthChecker.check(url, healthOptions));
     if (!check || (check.ok !== true && check.ready !== true)) throw makeError('New runtime health check failed', 'RUNTIME_HEALTH_FAILED');
     return check;
   }
@@ -547,6 +583,16 @@ class DshUpdateManager extends EventEmitter {
 
   _handleFailure(error, { manual, fatal = false }) {
     const details = errorDetails(error, { fatal });
+    if (!this.snapshot.operationId) {
+      const operationId = this._newOperationId(
+        this.snapshot.latest && this.snapshot.latest.version,
+        {
+          installedVersion: this.snapshot.currentRuntime && this.snapshot.currentRuntime.version,
+          runtimeKind: this.snapshot.currentRuntime && this.snapshot.currentRuntime.kind,
+        },
+      );
+      this._patch({ operationId });
+    }
     this._logError(details.message, error);
     this._transition(STATES.FAILED, { error: details, progress: null });
     this.emit('error', { error: clone(details), snapshot: this.getSnapshot() });
@@ -575,15 +621,33 @@ class DshUpdateManager extends EventEmitter {
 
   _transition(next, patch = {}) {
     const current = this.snapshot.state;
+    const operationId = this.snapshot.operationId || patch.operationId || null;
     if (current !== next && (!ALLOWED_TRANSITIONS[current] || !ALLOWED_TRANSITIONS[current].has(next))) {
       throw new Error(`Invalid DSH update state transition: ${current} -> ${next}`);
     }
     this.snapshot = { ...this.snapshot, ...clone(patch), state: next };
     if (current !== next) {
+      if (operationId) {
+        this._audit('update_state_transition', {
+          operationId,
+          from: current,
+          state: next,
+          oldVersion: this.snapshot.currentRuntime && this.snapshot.currentRuntime.version,
+          targetVersion: (this.snapshot.preparedRuntime && this.snapshot.preparedRuntime.version)
+            || (this.snapshot.latest && this.snapshot.latest.version)
+            || null,
+          pid: this.processManager && typeof this.processManager.getPid === 'function'
+            ? this.processManager.getPid()
+            : null,
+        });
+      }
       this.emit('state-change', { from: current, to: next, snapshot: this.getSnapshot() });
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'progress')) {
       this.emit('progress', { progress: clone(this.snapshot.progress), snapshot: this.getSnapshot() });
+    }
+    if (operationId && [STATES.SUCCESS, STATES.ROLLED_BACK, STATES.FAILED].includes(next)) {
+      this._completeOperation(next, operationId);
     }
   }
 
@@ -597,9 +661,40 @@ class DshUpdateManager extends EventEmitter {
     throw makeError('Runtime manager does not expose a runtime root', 'RUNTIME_ROOT_UNAVAILABLE');
   }
 
-  _newOperationId(version) {
+  _newOperationId(version, { installedVersion = null, runtimeKind = null } = {}) {
     this.operationCounter += 1;
-    return `update-${this._now()}-${this.operationCounter}`.replace(/[^A-Za-z0-9._-]/g, '-');
+    const operationId = `update-${this._now()}-${this.operationCounter}`.replace(/[^A-Za-z0-9._-]/g, '-');
+    this.operationStartedAt = this._now();
+    this._audit('update_operation_created', {
+      operationId,
+      installedVersion,
+      targetVersion: version || null,
+      runtimeKind,
+    });
+    return operationId;
+  }
+
+  _completeOperation(result, operationId = this.snapshot.operationId) {
+    if (!operationId || this.completedOperationId === operationId) return;
+    this.completedOperationId = operationId;
+    const durationMs = Math.max(0, this._now() - (this.operationStartedAt || this._now()));
+    this._audit('operation_completed', { operationId, result, durationMs });
+    if (this.snapshot.operationId === operationId) this._patch({ operationId: null });
+    this.operationStartedAt = null;
+  }
+
+  _audit(event, fields = {}) {
+    if (!this.logger || typeof this.logger.info !== 'function') return;
+    const record = {
+      timestamp: this._nowIso(),
+      event,
+      ...fields,
+    };
+    try {
+      this.logger.info(JSON.stringify(record));
+    } catch (_) {
+      // Observability must never change update behavior.
+    }
   }
 
   _now() {
@@ -618,6 +713,10 @@ class DshUpdateManager extends EventEmitter {
 
   _logError(message, error) {
     if (this.logger && typeof this.logger.error === 'function') this.logger.error(message, error);
+  }
+
+  _logInfo(message) {
+    if (this.logger && typeof this.logger.info === 'function') this.logger.info(message);
   }
 }
 

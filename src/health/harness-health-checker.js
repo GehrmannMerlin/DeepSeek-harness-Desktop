@@ -66,6 +66,23 @@ async function waitUntilReady(url, {
   }
 }
 
+function createReleaseE2eHealthChecker({ env = process.env, realChecker = waitUntilReady } = {}) {
+  const enabled = env && env.DSH_RELEASE_E2E === '1';
+  const targetVersion = env && env.DSH_RELEASE_E2E_FAIL_HEALTH_VERSION;
+  let failureConsumed = false;
+
+  return async function releaseE2eHealthChecker(url, options = {}) {
+    const runtimeVersion = options.runtime && options.runtime.version;
+    if (!failureConsumed && enabled && targetVersion &&
+        runtimeVersion === targetVersion &&
+        options.phase === 'post_activation_update_health') {
+      failureConsumed = true;
+      return { ok: false, elapsed: 0, controlledFailure: true };
+    }
+    return realChecker(url, options);
+  };
+}
+
 // Probe the default port: 'harness' (real dsh) | 'foreign' (something else
 // holds it) | 'free' (nothing listening).
 async function probe(port, { timeout = 1500 } = {}) {
@@ -75,4 +92,11 @@ async function probe(port, { timeout = 1500 } = {}) {
   return 'foreign';
 }
 
-module.exports = { check, waitUntilReady, probe, looksLikeHarness, SIGNATURES };
+module.exports = {
+  check,
+  waitUntilReady,
+  createReleaseE2eHealthChecker,
+  probe,
+  looksLikeHarness,
+  SIGNATURES,
+};

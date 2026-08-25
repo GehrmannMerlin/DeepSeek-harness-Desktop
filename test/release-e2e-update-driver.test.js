@@ -47,3 +47,21 @@ test('release E2E driver opens the real dialog and invokes its renderer API', as
   assert.match(calls[2][1], /window\.updateApi\.confirmUpdate\(\)/);
   detach();
 });
+
+test('release E2E driver can request normal lifecycle quit at one configured state', async () => {
+  const { lifecycle, manager, calls } = makeHarness();
+  lifecycle.quit = async () => calls.push(['quit']);
+  const detach = attachReleaseE2eUpdateDriver(lifecycle, {
+    env: {
+      DSH_RELEASE_E2E: '1',
+      DSH_RELEASE_E2E_EXIT_AFTER_STATE: 'WAITING_FOR_EXTERNAL_HARNESS',
+      DSH_RELEASE_E2E_EXIT_DELAY_MS: '0',
+    },
+  });
+
+  manager.emit('state-change', { snapshot: { state: 'WAITING_FOR_EXTERNAL_HARNESS' } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.deepEqual(calls.at(-1), ['quit']);
+  detach();
+});

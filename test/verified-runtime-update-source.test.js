@@ -44,6 +44,43 @@ test('loads the highest verified version for the exact target', async () => {
   assert.equal(latest.version, '0.1.0-rc.8');
   assert.equal(latest.platform, 'win32');
   assert.equal(latest.arch, 'x64');
+  assert.equal(source.isConfigured(), true);
+});
+
+test('missing index URL is an explicit safe unavailable condition', async () => {
+  const source = VerifiedRuntimeUpdateSource({ indexUrl: '' });
+
+  assert.equal(source.isConfigured(), false);
+  await assert.rejects(
+    source.getLatest({ platform: 'win32', arch: 'x64' }),
+    (error) => error.code === 'VERIFIED_RUNTIME_SOURCE_NOT_CONFIGURED',
+  );
+});
+
+test('malformed index URL is a controlled configuration error', async () => {
+  const source = VerifiedRuntimeUpdateSource({ indexUrl: 'not a URL' });
+
+  assert.equal(source.isConfigured(), true);
+  await assert.rejects(
+    source.getLatest({ platform: 'win32', arch: 'x64' }),
+    (error) => error.code === 'VERIFIED_RUNTIME_SOURCE_INVALID',
+  );
+});
+
+test('unreachable configured source remains a controlled source error', async () => {
+  const source = VerifiedRuntimeUpdateSource({
+    indexUrl: 'https://updates.example.test/runtime-index.json',
+    requestJson: async () => {
+      const error = new Error('offline');
+      error.code = 'ECONNREFUSED';
+      throw error;
+    },
+  });
+
+  await assert.rejects(
+    source.getLatest({ platform: 'win32', arch: 'x64' }),
+    (error) => error.code === 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE',
+  );
 });
 
 test('fails closed when the index has no exact target', async () => {

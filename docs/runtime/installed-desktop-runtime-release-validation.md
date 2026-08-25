@@ -292,3 +292,65 @@ The Runtime/Artifact Gate is substantially passing, and the core owned installed
 6. Keep the user’s malformed `.dsh/.credentials.yaml` outside the test scope; repeatable E2E must continue using an isolated task-local `DSH_HOME` or an equivalent supported fixture.
 
 Until all blockers are resolved and re-verified, the correct release decision is **BLOCKED — DO NOT MERGE**.
+
+Sections 13–21 above are the historical pre-closure snapshot. Sections 22–24
+below supersede its provisional gate decisions and record the final closure
+rerun; the historical failed rollback and the earlier installer hash remain
+preserved for auditability.
+
+## 22. Final closure rerun — installed rollback
+
+The final NSIS output used for this closure was:
+
+- Path: `D:\Develop\DeepSeek Agent\DeepSeek Agent Desktop\.worktrees\dsh-runtime-updater\dist\DeepSeek Harness Desktop Setup 1.0.0.exe`
+- Size: `320,198,438` bytes
+- SHA-256: `3A322F0A446757E4E2A4A834F0F6B562D012D78E10A63F9885160E5BADE25685`
+
+It was installed into the isolated directory
+`C:\Users\韩吉衍\AppData\Local\Temp\dsh-final-installed-20260825-111614\install`.
+The installed bundled manifest reported OLD `0.1.0-rc.7`, source revision
+`99f6f02fe`, Node `24.18.0`, pnpm `11.7.0`, and immutable `true`; the installed
+CLI returned `0.1.0-rc.7` with exit code `0`.
+
+The final installed rollback root was
+`C:\Users\韩吉衍\AppData\Local\Temp\dsh-final-installed-rollback-20260825-112438`.
+The real update reached `ROLLED_BACK` with operation ID
+`update-1787628284584-1`. The NEW runtime was intentionally failed only at the
+version-scoped post-activation health decision; the bundled OLD fallback
+started and passed health. The final state was bundled OLD `0.1.0-rc.7`,
+`pending: null`, and `failedVersions["0.1.1-rc.2"]` recorded. A second launch
+with the same userData preserved that state and safely skipped the update when
+the hosting index URL was absent.
+
+## 23. Final closure rerun — External Harness ownership and Pending Recovery
+
+The isolated evidence root was
+`C:\Users\韩吉衍\AppData\Local\Temp\dsh-final-external-pending-20260825-114000`.
+
+An independently started installed bundled CLI process, PID `16032`, passed
+the real health checker and owned `127.0.0.1:3080`. The installed Desktop
+recorded `existing_harness_check_finished state=harness`, reused the external
+URL, and reached `WAITING_FOR_EXTERNAL_HARNESS`. On normal quit it logged
+`external harness left running`. The exact PID remained alive after Desktop
+exit and was the only matching DSH web process; it was subsequently stopped
+separately with exact task-owned `taskkill /PID 16032 /T /F`.
+
+The same userData was then relaunched after the external process stopped. The
+persisted pending target was recovered: the OLD runtime passed health, managed
+NEW `0.1.1-rc.2` PID `34784` started and passed health, and the correlated
+operation `update-1787628869680-1` ended `SUCCESS`. The follow-up check
+operation `update-1787628874379-2` ended `UP_TO_DATE`. Final state was managed
+NEW `0.1.1-rc.2`, `pending: null`, empty `failedVersions`, and no remaining
+Desktop-owned runtime process or `3080` listener after normal shutdown.
+
+## 24. Final decision boundary
+
+FEATURE BRANCH MERGE READY: YES
+
+PUBLIC RELEASE READY: NO
+
+The code, focused tests, installed lifecycle evidence, audit correlation, and
+client-side hosting boundary are ready for feature-branch review. Public
+release remains blocked because no production Runtime Index or artifact
+hosting endpoint was configured or deployed. The task-local fixture is test
+evidence only and is not a release channel.

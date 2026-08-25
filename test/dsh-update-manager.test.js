@@ -31,6 +31,7 @@ function createHarness({
   ownsHarness = true,
   registryGetLatest,
   verifiedGetLatest,
+  verifiedSource: verifiedSourceOverride,
   installerInstall,
   artifactPrepare,
   verifierVerify,
@@ -44,6 +45,7 @@ function createHarness({
   processStart,
   deferredUrl = false,
   urlWaitTimeoutMs,
+  logger = silentLogger,
 } = {}) {
   const calls = [];
   const stateChanges = [];
@@ -95,12 +97,12 @@ function createHarness({
       return { ok: true, stagingRoot: input.stagingRoot };
     },
   };
-  const verifiedSource = verifiedGetLatest ? {
+  const verifiedSource = verifiedSourceOverride || (verifiedGetLatest ? {
     async getLatest(input) {
       calls.push(['verified', input]);
       return verifiedGetLatest(input);
     },
-  } : null;
+  } : null);
   const artifactDownloader = artifactPrepare ? {
     async prepare(input) {
       calls.push(['artifact', input.version]);
@@ -166,7 +168,7 @@ function createHarness({
     verifier,
     processManager,
     healthChecker,
-    logger: silentLogger,
+    logger,
     clock,
     urlWaitTimeoutMs,
   });
@@ -175,6 +177,17 @@ function createHarness({
   manager.on('notification', (event) => notifications.push(event));
   manager.on('update-available', (event) => updates.push(event));
   return { manager, calls, stateChanges, progressEvents, notifications, updates, runtimeManager, installer, processManager, artifactDownloader };
+}
+
+function auditRecords(logs) {
+  return logs
+    .map((message) => {
+      try { return JSON.parse(message); } catch { return null; }
+    })
+    .filter(Boolean)
+    .filter((record) => record.event === 'update_operation_created'
+      || record.event === 'update_state_transition'
+      || record.event === 'operation_completed');
 }
 
 test('uses verified artifact metadata and downloader instead of npm installer', async () => {
@@ -497,4 +510,77 @@ test('repeated checks and confirmations share one in-flight Promise', async () =
   resolveInstall({ ok: true });
   await confirmOne;
   assert.equal(installCount, 1);
+});
+
+test('missing verified hosting skips update checks without touching the current runtime', async () => {
+  const h = createHarness({
+    verifiedSource: {
+      isConfigured: () => false,
+      async getLatest() { throw new Error('must not fetch an unconfigured source'); },
+    },
+    registryGetLatest: async () => { throw new Error('must not query upstream when verified hosting is absent'); },
+  });
+
+  const snapshot = await h.manager.checkForUpdates({ manual: true });
+
+  assert.equal(snapshot.state, STATES.UP_TO_DATE);
+  assert.equal(snapshot.currentRuntime.version, '1.0.0');
+  assert.equal(h.calls.includes('registry'), false);
+  assert.equal(h.notifications.length, 1);
+  assert.equal(h.notifications[0].error.code, 'VERIFIED_RUNTIME_SOURCE_NOT_CONFIGURED');
+});
+
+test('successful update writes one correlated operation audit chain', async () => {
+  const logs = [];
+  const h = createHarness({ logger: { ...silentLogger, info: (message) => logs.push(message) } });
+
+  await h.manager.checkForUpdates();
+  const result = await h.manager.confirmUpdate();
+
+  assert.equal(result.state, STATES.SUCCESS);
+  const records = auditRecords(logs);
+  const operationIds = new Set(records.map((record) => record.operationId));
+  assert.equal(operationIds.size, 1);
+  assert.equal(records[0].event, 'update_operation_created');
+  assert.ok(records.some((record) => record.event === 'update_state_transition' && record.state === STATES.PREPARING));
+  assert.ok(records.some((record) => record.event === 'update_state_transition' && record.state === STATES.SUCCESS));
+  assert.deepEqual(records.at(-1).event, 'operation_completed');
+  assert.equal(records.at(-1).result, 'SUCCESS');
+  assert.equal(typeof records.at(-1).durationMs, 'number');
+  assert.equal(h.manager.getSnapshot().operationId, null);
+});
+
+test('rolled-back update writes failure, rollback, fallback, and completion under one operation id', async () => {
+  const logs = [];
+  const h = createHarness({
+    healthResults: [{ ok: false }, { ok: true }],
+    logger: { ...silentLogger, info: (message) => logs.push(message) },
+  });
+
+  await h.manager.checkForUpdates();
+  const result = await h.manager.confirmUpdate();
+
+  assert.equal(result.state, STATES.ROLLED_BACK);
+  const records = auditRecords(logs);
+  assert.equal(new Set(records.map((record) => record.operationId)).size, 1);
+  assert.ok(records.some((record) => record.event === 'update_state_transition' && record.state === STATES.ROLLING_BACK));
+  assert.ok(records.some((record) => record.event === 'update_state_transition' && record.state === STATES.ROLLED_BACK));
+  assert.equal(records.at(-1).result, 'ROLLED_BACK');
+});
+
+test('fatal failed update writes a FAILED completion record', async () => {
+  const logs = [];
+  const h = createHarness({
+    healthResults: [{ ok: false }, { ok: false }],
+    logger: { ...silentLogger, info: (message) => logs.push(message) },
+  });
+
+  await h.manager.checkForUpdates();
+  const result = await h.manager.confirmUpdate();
+
+  assert.equal(result.state, STATES.FAILED);
+  const records = auditRecords(logs);
+  assert.equal(new Set(records.map((record) => record.operationId)).size, 1);
+  assert.ok(records.some((record) => record.event === 'update_state_transition' && record.state === STATES.FAILED));
+  assert.equal(records.at(-1).result, 'FAILED');
 });
