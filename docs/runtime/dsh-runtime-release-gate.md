@@ -242,3 +242,78 @@ This section appends Task 9 evidence and intentionally preserves all historical 
 ### Gate decision
 
 Local implementation and dry-run evidence are separate from the Remote Publish Gate. The local rows do not authorize or imply a remote Release/Pages deployment. Overall status remains **BLOCKED**; no remote mutation was performed locally.
+
+## Task 10 — Local production Distribution gate evidence (2026-08-25)
+
+This section appends Task 10 verification evidence and preserves all historical
+gate material above. It records local observations only; it does not authorize
+or perform a GitHub Release, Pages deployment, branch push, or production
+promotion.
+
+### Execution context
+
+- Worktree used: `D:\Develop\DeepSeek Agent\DeepSeek Agent Desktop\.worktrees\dsh-runtime-distribution`
+- Branch: `codex/dsh-runtime-distribution`
+- HEAD before the evidence-only documentation commit: `a5421bb7d98f0cda534edcf73c0114a754bb5cea`
+- Worktree was clean before the documentation update.
+- The nominal `dsh-runtime-updater` directory supplied as the initial working
+  directory was not a Git worktree and did not contain the application sources,
+  plan, or Task 10 brief. The actual distribution worktree above contained the
+  requested sources and task documents and was used for verification.
+
+### Exact command results
+
+| Command | Result |
+| --- | --- |
+| `node --test test/runtime-distribution-contract.test.js test/runtime-source-mapping.test.js test/runtime-candidate-store.test.js test/runtime-remote-verification.test.js test/runtime-stable-index.test.js test/runtime-distribution-cli.test.js test/runtime-distribution-workflows.test.js` | PASS; 86 tests, 86 passed, 0 failed, 0 skipped; exit 0; 487.186 ms |
+| `npm run distribution:dry-run` | PASS; `candidatePublish=PUBLISHED`, `remoteVerification=REMOTE_VERIFIED`, stable `0.1.1-rc.2`, rollback `0.1.0-rc.7`, `npmInstallCalls=0`; exit 0 |
+| `npm test` | PASS; 235 tests, 234 passed, 0 failed, 1 skipped, 0 todo; exit 0; 1834.5008 ms |
+| `git diff --check` | PASS; exit 0 |
+| `npm run distribution:validate-workflows` | PASS; `valid=true`; discovered `dsh-runtime-factory.yml` and `dsh-runtime-promote.yml`; exit 0 |
+| `actionlint .github/workflows/dsh-runtime-factory.yml .github/workflows/dsh-runtime-promote.yml` | SKIPPED / NOT INSTALLED; `actionlint` was not available on PATH, and no installation was attempted |
+| `if ($env:DSH_REAL_RUNTIME_ARTIFACT) { node --test test/runtime-artifact-update-e2e.test.js } else { ... }` | SKIPPED / NOT AVAILABLE; `DSH_REAL_RUNTIME_ARTIFACT` was not set |
+
+The one full-suite skip is the existing real artifact HTTP/download E2E and is
+consistent with the explicit environment-gated skip above. No real artifact
+E2E result is claimed.
+
+### Dry-run artifact and ordering evidence
+
+The deterministic dry-run used the candidate fixture `0.1.1-rc.2` and the
+previous candidate `0.1.0-rc.7`:
+
+- Candidate artifact: 17 bytes,
+  SHA-256 `f70cc052e512dc877d3fbcc8c1f254dc7270c7cb7e803a909a2c99a62ae71c2e`.
+- Rollback artifact: 16 bytes,
+  SHA-256 `a5565db19ccbcab3d505369668f576e1174c03e31b93338cb8c1a86cfd53b94a`.
+- Stable promotion read back exact candidate version `0.1.1-rc.2`.
+- Rollback read back exact previous version `0.1.0-rc.7`.
+- npm dependency-resolution/installer calls: `0`.
+- The CLI integration assertions observed candidate publication and readback,
+  then `REMOTE_VERIFIED`, before stable-index read/validation/publication.
+  Rollback likewise read the candidate before its remote verification and used
+  the same verified promotion path.
+
+### Remote-mutation and release-boundary audit
+
+- No `git push`, `gh release create`, `gh release upload`, Pages deployment, or
+  production URL write was executed.
+- The deterministic tests and dry run use task-owned local temporary roots and
+  injected adapters; they do not contact GitHub or mutate Releases/Pages.
+- Workflow validation and static workflow tests preserve the boundary that
+  Factory creates/verifies candidates while stable publication is a separate
+  manual operation.
+- Stable-index publication was observed only after remote-like verification in
+  the local event-order assertions; no stable index was changed before
+  verification.
+- No remote Release, Pages, branch, or stable production state is inferred from
+  these local results.
+
+### Task 10 gate decision
+
+Local Distribution implementation and deterministic local gates: **PASS**.
+Remote mutation: **NOT PERFORMED**.
+Real artifact E2E: **NOT PERFORMED — DSH_REAL_RUNTIME_ARTIFACT was not set**.
+Public **RELEASE READY: NO**. The existing blockers remain: no real remote
+candidate/Pages publication and no installed Desktop HTTPS update, restart,
+rollback, and zero-npm production E2E evidence.
