@@ -203,7 +203,8 @@ test('preserves a previously accepted output when a replacement fails validation
 
 test('builder maps generated runtime outside asar and keeps build output ignored', async () => {
   const builder = await fs.readFile(path.join(__dirname, '..', 'electron-builder.yml'), 'utf8');
-  const ignore = await fs.readFile(path.join(__dirname, '..', '.gitignore'), 'utf8');
+  const ignore = (await fs.readFile(path.join(__dirname, '..', '.gitignore'), 'utf8'))
+      .replace(/\r\n/g, '\n');
   const packageJson = JSON.parse(await fs.readFile(path.join(__dirname, '..', 'package.json'), 'utf8'));
   assert.match(builder, /asar:\s*true/);
   assert.match(builder, /extraResources:/);
