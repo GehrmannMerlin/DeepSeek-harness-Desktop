@@ -1,6 +1,7 @@
 'use strict';
 
 const semver = require('semver');
+const net = require('node:net');
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 
@@ -51,11 +52,36 @@ function assertProductionHttpsUrl(url) {
     throw new Error('production URL must be an absolute HTTPS URL');
   }
   const hostname = parsed.hostname.toLowerCase();
-  if (parsed.protocol !== 'https:' || hostname === 'localhost' || hostname.endsWith('.localhost') ||
-      hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]') {
+  if (parsed.protocol !== 'https:' || isLoopbackOrLocalHostname(hostname)) {
     throw new Error('production URL must be a non-loopback HTTPS URL');
   }
   return url;
+}
+
+function isLoopbackOrLocalHostname(hostname) {
+  const normalized = hostname.replace(/\.+$/, '').replace(/^\[|\]$/g, '');
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
+
+  if (net.isIP(normalized) === 4) {
+    return normalized.split('.').map(Number)[0] === 127;
+  }
+  if (net.isIP(normalized) !== 6) return false;
+
+  const groups = normalized.split(':');
+  const expanded = [];
+  const gap = groups.indexOf('');
+  if (gap >= 0) {
+    const left = groups.slice(0, gap).filter(Boolean);
+    const right = groups.slice(gap + 1).filter(Boolean);
+    expanded.push(...left, ...Array(8 - left.length - right.length).fill('0'), ...right);
+  } else {
+    expanded.push(...groups);
+  }
+  const words = expanded.map((group) => Number.parseInt(group || '0', 16));
+  if (words.length !== 8) return false;
+  if (words.slice(0, 7).every((word) => word === 0) && words[7] === 1) return true;
+  return words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff &&
+    (words[6] >>> 8) === 0x7f;
 }
 
 function candidateIdentity({ version, sha256, sizeBytes }) {
@@ -73,7 +99,7 @@ function compareCandidateIdentity(existing, next) {
   const current = candidateIdentity(existing);
   const candidate = candidateIdentity(next);
   if (current.version !== candidate.version) return 'NEW';
-  if (current.sha256 !== candidate.sha256 || current.sizeBytes !== candidate.sizeBytes) return 'HASH_CONFLICT';
+  if (current.sha256 !== candidate.sha256) return 'HASH_CONFLICT';
   return 'ALREADY_PUBLISHED';
 }
 

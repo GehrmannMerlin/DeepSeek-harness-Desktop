@@ -56,7 +56,11 @@ test('accepts a production HTTPS URL', () => {
 for (const url of [
   'http://updates.example.test/releases/index.json',
   'https://localhost/releases/index.json',
+  'https://localhost./releases/index.json',
   'https://127.0.0.1/releases/index.json',
+  'https://127.0.0.2/releases/index.json',
+  'https://127.1.2.3/releases/index.json',
+  'https://[::ffff:127.0.0.1]/releases/index.json',
   'https://[::1]/releases/index.json',
   'not a URL',
 ]) {
@@ -84,6 +88,9 @@ test('normalizes SHA-256 values and validates candidate size', () => {
 test('same version and hash is already published while a different hash is a conflict', () => {
   const existing = candidateIdentity({ version: '0.1.1-rc.2', sha256: 'a'.repeat(64), sizeBytes: 10 });
   assert.equal(compareCandidateIdentity(existing, existing), 'ALREADY_PUBLISHED');
+  assert.equal(compareCandidateIdentity(existing, {
+    version: '0.1.1-rc.2', sha256: 'a'.repeat(64), sizeBytes: 20,
+  }), 'ALREADY_PUBLISHED');
   assert.equal(compareCandidateIdentity(existing, {
     version: '0.1.1-rc.2', sha256: 'b'.repeat(64), sizeBytes: 10,
   }), 'HASH_CONFLICT');
