@@ -14,11 +14,11 @@ const WORKFLOW = path.join(__dirname, '..', '.github', 'workflows', 'dsh-runtime
 const PROMOTION_WORKFLOW = path.join(__dirname, '..', '.github', 'workflows', 'dsh-runtime-promote.yml');
 
 function workflowText() {
-  return fs.readFileSync(WORKFLOW, 'utf8');
+  return fs.readFileSync(WORKFLOW, 'utf8').replace(/\r\n/g, '\n');
 }
 
 function promotionWorkflowText() {
-  return fs.readFileSync(PROMOTION_WORKFLOW, 'utf8');
+  return fs.readFileSync(PROMOTION_WORKFLOW, 'utf8').replace(/\r\n/g, '\n');
 }
 
 test('Windows runtime factory workflow has the required triggers and immutable toolchain', () => {
