@@ -8,9 +8,10 @@ const path = require('node:path');
 const { Transform, pipeline: pipelineCallback } = require('node:stream');
 const { promisify } = require('node:util');
 
-const { assertProductionHttpsUrl } = require('./distribution-contract');
+const { assertProductionHttpsUrl, assertTarget, candidateIdentity } = require('./distribution-contract');
 const { extractZip } = require('../../src/update/runtime-artifact-downloader');
 const { verifyRuntime } = require('../../src/update/runtime-verifier');
+const { PACKAGE_NAME, validateManifest } = require('../../src/runtime/verified-runtime-artifact');
 const { defaultSmoke } = require('../build-verified-runtime-artifact');
 
 const pipeline = promisify(pipelineCallback);
@@ -30,7 +31,11 @@ function classifyDownloadError(error) {
 }
 
 function downloadRemoteArtifact(url, destination, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  assertProductionHttpsUrl(url);
+  try {
+    assertProductionHttpsUrl(url);
+  } catch (error) {
+    throw codedError('REMOTE_ARTIFACT_URL_INVALID', error.message, error);
+  }
   return new Promise((resolve, reject) => {
     const started = Date.now();
     let settled = false;
@@ -71,9 +76,27 @@ function downloadRemoteArtifact(url, destination, { timeoutMs = DEFAULT_TIMEOUT_
 
 function assertCandidateManifest(candidate) {
   const manifest = candidate && candidate.manifest;
-  if (!manifest || manifest.schemaVersion !== 1 || manifest.packageName !== candidate.packageName ||
-      manifest.version !== candidate.version || manifest.platform !== candidate.platform || manifest.arch !== candidate.arch) {
-    throw codedError('REMOTE_MANIFEST_MISMATCH', 'candidate manifest identity does not match its descriptor');
+  if (candidate.packageName !== PACKAGE_NAME) throw new Error('candidate packageName is not the DSH package');
+  validateManifest(manifest, {
+    packageName: candidate.packageName,
+    version: candidate.version,
+    platform: candidate.platform,
+    arch: candidate.arch,
+  });
+  if (manifest.packageName !== candidate.packageName || manifest.version !== candidate.version ||
+      manifest.platform !== candidate.platform || manifest.arch !== candidate.arch) {
+    throw new Error('candidate manifest identity does not match its descriptor');
+  }
+}
+
+function validateCandidate(candidate) {
+  try {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error('candidate is required');
+    candidateIdentity(candidate);
+    assertTarget(candidate);
+    assertCandidateManifest(candidate);
+  } catch (error) {
+    throw codedError('REMOTE_CANDIDATE_INVALID', error.message, error);
   }
 }
 
@@ -84,7 +107,12 @@ function mapVerificationFailure(verification) {
 }
 
 function smokeSucceeded(smokeResult) {
-  return smokeResult && smokeResult.ok !== false && smokeResult.web !== 'failed' && smokeResult.health !== 'failed' && smokeResult.native !== 'failed';
+  if (!smokeResult || smokeResult.ok === false) return false;
+  for (const component of ['web', 'health', 'native']) {
+    const value = smokeResult[component];
+    if (value === 'failed' || (value && typeof value === 'object' && value.ok === false)) return false;
+  }
+  return true;
 }
 
 async function verifyRemoteCandidate({
@@ -96,16 +124,25 @@ async function verifyRemoteCandidate({
   tempRoot,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
-  if (!candidate || typeof candidate !== 'object') throw codedError('REMOTE_CANDIDATE_INVALID', 'candidate is required');
-  if (typeof tempRoot !== 'string' || tempRoot.length === 0) throw codedError('REMOTE_CANDIDATE_INVALID', 'tempRoot is required');
-  assertProductionHttpsUrl(candidate.artifactUrl);
-  assertCandidateManifest(candidate);
-  const started = Date.now();
-  const stagingRoot = path.join(tempRoot, `remote-${process.pid}-${crypto.randomUUID()}`);
-  const archivePart = path.join(stagingRoot, 'artifact.zip.part');
-  const archivePath = path.join(stagingRoot, 'artifact.zip');
-  const extractionRoot = path.join(stagingRoot, 'extracted');
+  let started;
+  let stagingRoot;
+  let archivePart;
+  let archivePath;
+  let extractionRoot;
+  let primaryError = null;
   try {
+    if (typeof tempRoot !== 'string' || tempRoot.length === 0) throw codedError('REMOTE_CANDIDATE_INVALID', 'tempRoot is required');
+    validateCandidate(candidate);
+    try {
+      assertProductionHttpsUrl(candidate.artifactUrl);
+    } catch (error) {
+      throw codedError('REMOTE_ARTIFACT_URL_INVALID', error.message, error);
+    }
+    started = Date.now();
+    stagingRoot = path.join(tempRoot, `remote-${process.pid}-${crypto.randomUUID()}`);
+    archivePart = path.join(stagingRoot, 'artifact.zip.part');
+    archivePath = path.join(stagingRoot, 'artifact.zip');
+    extractionRoot = path.join(stagingRoot, 'extracted');
     await fsp.mkdir(stagingRoot, { recursive: true });
     let observed;
     try {
@@ -154,13 +191,26 @@ async function verifyRemoteCandidate({
       verification,
     };
   } catch (error) {
-    if (error && error.code) throw error;
-    throw codedError('REMOTE_VERIFICATION_FAILED', error.message, error);
+    primaryError = error && error.code ? error : codedError('REMOTE_VERIFICATION_FAILED', error.message, error);
+    throw primaryError;
   } finally {
-    await fsp.rm(archivePart, { force: true });
-    await fsp.rm(archivePath, { force: true });
-    await fsp.rm(stagingRoot, { recursive: true, force: true });
-    await fsp.rm(tempRoot, { recursive: true, force: true });
+    const cleanupTargets = [
+      [archivePart, { force: true }],
+      [archivePath, { force: true }],
+      [stagingRoot, { recursive: true, force: true }],
+      [tempRoot, { recursive: true, force: true }],
+    ].filter(([target]) => typeof target === 'string');
+    const cleanupErrors = [];
+    for (const [target, options] of cleanupTargets) {
+      try {
+        await fsp.rm(target, options);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (!primaryError && cleanupErrors.length > 0) {
+      throw codedError('REMOTE_CLEANUP_FAILED', 'remote verification cleanup failed');
+    }
   }
 }
 

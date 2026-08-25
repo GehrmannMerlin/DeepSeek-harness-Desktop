@@ -149,6 +149,72 @@ test('rejects expected size mismatch before extraction', async () => {
   } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
 });
 
+test('rejects invalid candidate identity before download or extraction with a stable coded error', async () => {
+  const invalidCandidates = [
+    makeCandidate({ version: 'not-semver' }),
+    makeCandidate({ packageName: '@other/package' }),
+    makeCandidate({ platform: 'linux' }),
+    makeCandidate({ arch: 'arm64' }),
+    makeCandidate({ sizeBytes: 0 }),
+    makeCandidate({ sizeBytes: Number.MAX_SAFE_INTEGER + 1 }),
+    makeCandidate({ sha256: 'bad-sha' }),
+    makeCandidate({ manifest: { ...makeCandidate().manifest, version: '0.1.1-rc.3' } }),
+  ];
+  for (const candidate of invalidCandidates) {
+    const tempRoot = await makeRoot();
+    let downloads = 0;
+    let extracted = 0;
+    try {
+      await assert.rejects(() => verifyRemoteCandidate({
+        candidate,
+        download: async () => { downloads += 1; return { statusCode: 200, contentLength: BODY.length, sizeBytes: BODY.length, sha256: SHA256, durationMs: 1 }; },
+        extractZip: async () => { extracted += 1; },
+        verifyRuntime: async () => ({ ok: true }), smoke: async () => ({ ok: true }), tempRoot,
+      }), error => error.code === 'REMOTE_CANDIDATE_INVALID');
+      assert.equal(downloads, 0);
+      assert.equal(extracted, 0);
+    } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
+  }
+});
+
+test('rejects an invalid artifact URL with a coded verification error before download', async () => {
+  const tempRoot = await makeRoot();
+  let downloads = 0;
+  try {
+    await assert.rejects(() => verifyRemoteCandidate({
+      candidate: makeCandidate({ artifactUrl: 'http://updates.example.test/runtime.zip' }),
+      download: async () => { downloads += 1; return {}; },
+      extractZip: async () => {}, verifyRuntime: async () => ({ ok: true }), smoke: async () => ({ ok: true }), tempRoot,
+    }), error => error.code === 'REMOTE_ARTIFACT_URL_INVALID');
+    assert.equal(downloads, 0);
+  } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
+});
+
+test('cleanup attempts every path and preserves the original verification error when rm fails', async (t) => {
+  const tempRoot = await makeRoot();
+  const rmCalls = [];
+  const originalRm = fs.rm;
+  t.mock.method(fs, 'rm', async (target, options) => {
+    rmCalls.push({ target, options });
+    if (rmCalls.length === 1) throw new Error('simulated cleanup failure');
+    return originalRm(target, options);
+  });
+  try {
+    await assert.rejects(() => verifyRemoteCandidate({
+      candidate: makeCandidate(), download: async () => { throw Object.assign(new Error('download failed'), { code: 'REMOTE_DOWNLOAD_FAILED' }); },
+      extractZip: async () => {}, verifyRuntime: async () => ({ ok: true }), smoke: async () => ({ ok: true }), tempRoot,
+    }), error => error.code === 'REMOTE_DOWNLOAD_FAILED');
+    assert.equal(rmCalls.length, 4);
+    assert.equal(rmCalls[0].options.force, true);
+    assert.equal(rmCalls[1].options.force, true);
+    assert.equal(rmCalls[2].options.recursive, true);
+    assert.equal(rmCalls[3].target, tempRoot);
+  } finally {
+    t.mock.restoreAll();
+    await originalRm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 for (const [name, failure, code] of [
   ['unsafe ZIP', async () => { throw Object.assign(new Error('unsafe'), { code: 'ARCHIVE_ENTRY_UNSAFE' }); }, 'REMOTE_EXTRACTION_FAILED'],
   ['wrong manifest identity', async () => ({ ok: false, reason: 'manifest-mismatch' }), 'REMOTE_MANIFEST_MISMATCH'],
@@ -171,3 +237,16 @@ for (const [name, failure, code] of [
     } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
   });
 }
+
+test('rejects a nested structured smoke failure instead of returning REMOTE_VERIFIED', async () => {
+  const tempRoot = await makeRoot();
+  try {
+    await assert.rejects(() => verifyRemoteCandidate({
+      candidate: makeCandidate(), download: downloadBody(),
+      extractZip: async ({ extractionRoot }) => extractionRoot,
+      verifyRuntime: async () => ({ ok: true }),
+      smoke: async () => ({ ok: true, web: { ok: false, reason: 'health-check-failed' }, health: { ok: true }, native: { ok: true } }),
+      tempRoot,
+    }), error => error.code === 'REMOTE_SMOKE_FAILED');
+  } finally { await fs.rm(tempRoot, { recursive: true, force: true }); }
+});
