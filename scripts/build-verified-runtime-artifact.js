@@ -68,7 +68,7 @@ async function copyTree(source, destination, active = new Set()) {
   const realSource = await fsp.realpath(source);
   const stat = await fsp.lstat(source);
   if (stat.isSymbolicLink()) {
-    if (active.has(realSource)) throw new Error(`Factory source contains a recursive link: ${source}`);
+    if (active.has(realSource)) return;
     return copyTree(realSource, destination, active);
   }
   if (active.has(realSource)) throw new Error(`Factory source contains a recursive link: ${source}`);

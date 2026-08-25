@@ -41,3 +41,31 @@ test('factory creates a portable ZIP, index identity, and archive self-smoke', a
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(output, 'runtime-index.json'), 'utf8')).artifacts, [result.indexEntry]);
   });
 });
+
+test('factory skips recursive source links while preserving the portable runtime files', async () => {
+  await withTempDir(async (root) => {
+    const source = path.join(root, 'source-runtime');
+    await writeJson(path.join(source, 'package.json'), { name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', bin: { dsh: 'lib/bin.js' } });
+    await fs.mkdir(path.join(source, 'lib'), { recursive: true });
+    await fs.writeFile(path.join(source, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 'utf8');
+    await fs.symlink(source, path.join(source, 'recursive-link'), process.platform === 'win32' ? 'junction' : 'dir');
+    const output = path.join(root, 'artifacts');
+
+    const result = await buildVerifiedRuntimeArtifact({
+      sourceRuntimeRoot: source,
+      outputDirectory: output,
+      version: '0.1.0-rc.7',
+      artifactUrl: 'https://updates.example.test/dsh-0.1.0-rc.7-win32-x64.zip',
+      sourceRevision: '99f6f02fe',
+      pnpmVersion: '11.7.0',
+      runCommand: async () => ({ code: 0, stdout: 'dsh 0.1.0-rc.7\n', stderr: '' }),
+      smokeImpl: async () => ({ web: 'passed', native: 'passed' }),
+    });
+
+    const archive = await unzipper.Open.file(result.archivePath);
+    const names = archive.files.map((file) => file.path);
+    assert.ok(names.includes('runtime-manifest.json'));
+    assert.ok(names.includes('node_modules/@deepseek-ai/dsh/lib/bin.js'));
+    assert.ok(!names.some((name) => name.includes('recursive-link')));
+  });
+});
