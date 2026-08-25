@@ -97,3 +97,30 @@ test('factory reuses materialized targets for repeated source links', async () =
     assert.equal(await fs.readFile(path.join(destination, 'second', 'payload.txt'), 'utf8'), 'shared payload\n');
   });
 });
+
+test('factory falls back to copying when Windows cannot create a materialized hard link', async () => {
+  await withTempDir(async (root) => {
+    const source = path.join(root, 'source-runtime');
+    const shared = path.join(source, 'shared');
+    const destination = path.join(root, 'destination');
+    await fs.mkdir(shared, { recursive: true });
+    await fs.writeFile(path.join(shared, 'payload.txt'), 'shared payload\n', 'utf8');
+    await fs.symlink(shared, path.join(source, 'first'), process.platform === 'win32' ? 'junction' : 'dir');
+    await fs.symlink(shared, path.join(source, 'second'), process.platform === 'win32' ? 'junction' : 'dir');
+
+    const originalLink = fs.link;
+    fs.link = async () => {
+      const error = new Error('hard links are unavailable in this fixture');
+      error.code = 'UNKNOWN';
+      throw error;
+    };
+    try {
+      await copyTree(source, destination);
+    } finally {
+      fs.link = originalLink;
+    }
+
+    assert.equal(await fs.readFile(path.join(destination, 'first', 'payload.txt'), 'utf8'), 'shared payload\n');
+    assert.equal(await fs.readFile(path.join(destination, 'second', 'payload.txt'), 'utf8'), 'shared payload\n');
+  });
+});

@@ -78,7 +78,6 @@ async function cloneMaterializedTree(source, destination) {
       try {
         await fsp.link(sourceEntry, destinationEntry);
       } catch (error) {
-        if (!['EXDEV', 'EPERM', 'EEXIST'].includes(error && error.code)) throw error;
         if (error.code === 'EEXIST') continue;
         await fsp.copyFile(sourceEntry, destinationEntry);
       }
