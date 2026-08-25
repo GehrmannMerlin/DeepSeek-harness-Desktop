@@ -192,6 +192,11 @@ async function normalizeRuntimeLayout(rootPath, packageJson) {
   await fsp.mkdir(packageRoot, { recursive: true });
   await fsp.copyFile(path.join(rootPath, 'package.json'), path.join(packageRoot, 'package.json'));
   await copyTree(path.join(rootPath, 'lib'), path.join(packageRoot, 'lib'));
+  try {
+    await copyTree(path.join(rootPath, 'config'), path.join(packageRoot, 'config'));
+  } catch (error) {
+    if (error && error.code !== 'ENOENT') throw error;
+  }
   return 'node_modules/@deepseek-ai/dsh/lib/bin.js';
 }
 

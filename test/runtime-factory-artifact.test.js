@@ -48,6 +48,8 @@ test('factory skips recursive source links while preserving the portable runtime
     await writeJson(path.join(source, 'package.json'), { name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', bin: { dsh: 'lib/bin.js' } });
     await fs.mkdir(path.join(source, 'lib'), { recursive: true });
     await fs.writeFile(path.join(source, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 'utf8');
+    await fs.mkdir(path.join(source, 'config', 'agent-presets'), { recursive: true });
+    await fs.writeFile(path.join(source, 'config', 'agent-presets', 'standard.yml'), 'name: standard\n', 'utf8');
     await fs.symlink(source, path.join(source, 'recursive-link'), process.platform === 'win32' ? 'junction' : 'dir');
     const output = path.join(root, 'artifacts');
 
@@ -66,6 +68,7 @@ test('factory skips recursive source links while preserving the portable runtime
     const names = archive.files.map((file) => file.path);
     assert.ok(names.includes('runtime-manifest.json'));
     assert.ok(names.includes('node_modules/@deepseek-ai/dsh/lib/bin.js'));
+    assert.ok(names.includes('node_modules/@deepseek-ai/dsh/config/agent-presets/standard.yml'));
     assert.ok(!names.some((name) => name.includes('recursive-link')));
   });
 });

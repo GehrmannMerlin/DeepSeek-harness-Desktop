@@ -178,6 +178,16 @@ jobs:
           pnpm --filter @deepseek-ai/dsh deploy --prod --legacy factory-runtime
           if (-not (Test-Path 'factory-runtime/package.json')) { throw 'Isolated DSH production package was not created' }
 
+      - name: Smoke isolated production DSH CLI
+        if: steps.resolve.outputs.skip != 'true'
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = node factory-runtime/lib/bin.js --version 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "Isolated DSH CLI --version failed: $output" }
+          if ($output -notmatch [regex]::Escape($env:RUNTIME_VERSION)) { throw "Isolated DSH CLI version mismatch: $output" }
+
       - name: Verify upstream layout and exact package version
         if: steps.resolve.outputs.skip != 'true'
         shell: pwsh

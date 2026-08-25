@@ -81,6 +81,7 @@ test('Windows runtime factory deploys an isolated production package before mate
   assert.ok(factory >= 0 && deploy < factory, 'isolated deploy must precede Factory materialization');
   assert.match(text, /factory-runtime/);
   assert.match(text, /--source-runtime upstream\/factory-runtime/);
+  assert.match(text, /factory-runtime\/lib\/bin\.js --version/);
 });
 
 test('Windows runtime factory invokes existing factory and CLI paths with immutable candidate publication', () => {
