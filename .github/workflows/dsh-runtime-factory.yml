@@ -139,6 +139,14 @@ jobs:
         with:
           version: ${{ env.PNPM_VERSION }}
 
+      - name: Install Desktop distribution dependencies
+        if: steps.resolve.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "CURRENT_PHASE=workflow-dependencies" >> $env:GITHUB_ENV
+          npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
       - name: Checkout exact upstream source tag
         if: steps.resolve.outputs.skip != 'true'
         uses: actions/checkout@v4

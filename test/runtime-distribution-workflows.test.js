@@ -45,6 +45,14 @@ test('Windows runtime factory treats an absent candidate and failure summary as 
   assert.match(text, /\$summary = @"[\s\S]*\n          "@\n/);
 });
 
+test('Windows runtime factory installs declared Desktop dependencies before workflow validation', () => {
+  const text = workflowText();
+  const install = text.indexOf('npm ci --omit=dev --ignore-scripts');
+  const validation = text.indexOf('validate-workflows');
+  assert.ok(install >= 0, 'Factory must install the declared production dependencies');
+  assert.ok(validation >= 0 && install < validation, 'Dependency installation must precede workflow validation');
+});
+
 test('Windows runtime factory resolves latest before checkout and uses the exact upstream tag', () => {
   const text = workflowText();
   const checkout = text.indexOf('actions/checkout@');
