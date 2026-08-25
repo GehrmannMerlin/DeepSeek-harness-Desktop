@@ -165,6 +165,25 @@ test('promoteStable remotely verifies before publishing and never invokes a buil
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, 'runtime-index.json'))), result.index);
 });
 
+test('promoteStable forwards deterministic now to the history publication', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'stable-index-'));
+  try {
+    const value = candidate();
+    const result = await promoteStable({
+      candidateStore: { read: async version => version === value.version ? value : null },
+      candidateVersion: value.version,
+      remoteVerifier: async () => ({ status: 'REMOTE_VERIFIED' }),
+      indexPath: path.join(root, 'runtime-index.json'),
+      historyDirectory: path.join(root, 'history'),
+      now: () => '2026-08-25T00:00:00.000Z',
+    });
+    const historyPath = path.join(root, 'history', '2026-08-25T00-00-00-000Z-0.1.1-rc.2.json');
+    assert.equal(await fs.readFile(historyPath, 'utf8'), `${JSON.stringify(result.index, null, 2)}\n`);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('promotion rejects missing candidates and remote failures without changing the stable index', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'stable-index-'));
   const indexPath = path.join(root, 'runtime-index.json');
@@ -176,15 +195,22 @@ test('promotion rejects missing candidates and remote failures without changing 
 
 test('rollbackStable uses the same verified promotion path for an existing candidate', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'stable-index-'));
-  const value = candidate('0.1.0-rc.7');
-  let verified = false;
-  const result = await rollbackStable({
-    candidateStore: { read: async version => version === value.version ? value : null },
-    targetVersion: value.version,
-    remoteVerifier: async () => { verified = true; return { status: 'REMOTE_VERIFIED' }; },
-    indexPath: path.join(root, 'runtime-index.json'),
-    historyDirectory: path.join(root, 'history'),
-  });
-  assert.equal(verified, true);
-  assert.equal(result.version, value.version);
+  try {
+    const value = candidate('0.1.0-rc.7');
+    let verified = false;
+    const result = await rollbackStable({
+      candidateStore: { read: async version => version === value.version ? value : null },
+      targetVersion: value.version,
+      remoteVerifier: async () => { verified = true; return { status: 'REMOTE_VERIFIED' }; },
+      indexPath: path.join(root, 'runtime-index.json'),
+      historyDirectory: path.join(root, 'history'),
+      now: () => '2026-08-25T00:00:00.000Z',
+    });
+    assert.equal(verified, true);
+    assert.equal(result.version, value.version);
+    const historyPath = path.join(root, 'history', '2026-08-25T00-00-00-000Z-0.1.0-rc.7.json');
+    assert.equal(await fs.readFile(historyPath, 'utf8'), `${JSON.stringify(result.index, null, 2)}\n`);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

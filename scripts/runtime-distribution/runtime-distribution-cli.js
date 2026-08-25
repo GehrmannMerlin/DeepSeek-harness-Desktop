@@ -62,6 +62,11 @@ async function detect({ root, registry, sourceMapping, factory, candidateStore, 
     throw new TypeError('indexPublication.read adapter is required');
   }
   const latest = await registry.readLatest();
+  if (!latest || (typeof latest !== 'string' && typeof latest.version !== 'string')) {
+    const error = new Error('registry adapter returned a malformed latest response');
+    error.code = 'DISTRIBUTION_REGISTRY_RESPONSE_INVALID';
+    throw error;
+  }
   const upstreamLatest = typeof latest === 'string' ? latest : latest.version;
   const existing = await candidateStore.read(upstreamLatest);
   const stableVersion = versionFromIndex(await indexPublication.read());
@@ -125,7 +130,9 @@ async function runDryRun({ root, fixture = {}, now = () => new Date().toISOStrin
   const factory = fixture.factory || { buildCandidate: async () => { throw new Error('Factory is disabled in local dry-run'); } };
   const detected = await detect({ root, registry, sourceMapping, factory, candidateStore: store, indexPublication });
 
-  const npmInstallCalls = Number(fixture.npmInstallCalls || 0);
+  const npmInstallCalls = fixture.npmInstaller && typeof fixture.npmInstaller.getCallCount === 'function'
+    ? fixture.npmInstaller.getCallCount()
+    : Number(fixture.npmInstallCalls || 0);
   const remoteVerification = fixture.remoteVerification || (async ({ candidate: value }) => verifyRemoteCandidate({
     candidate: value,
     tempRoot: path.join(root, 'remote-staging'),
@@ -143,15 +150,20 @@ async function runDryRun({ root, fixture = {}, now = () => new Date().toISOStrin
     : await publishFixtureCandidate({ store, candidate, fixture, root });
   const candidateReadback = await store.read(candidate.version);
   const remoteStatus = await remoteVerification({ candidate: candidateReadback });
+  const promotionRemoteVerifier = async ({ candidate: value }) => {
+    if (value.version === candidateReadback.version) return remoteStatus;
+    return remoteVerification({ candidate: value });
+  };
   const promotion = await promoteStable({
     candidateStore: store,
     candidateVersion: candidate.version,
-    remoteVerifier: remoteVerification,
+    remoteVerifier: promotionRemoteVerifier,
     indexPath: indexPublication.indexPath || candidateIndexPath(root),
     historyDirectory: indexPublication.historyDirectory || historyDirectory(root),
     now,
   });
   const promotedIndex = await indexPublication.read();
+  if (typeof indexPublication.validate === 'function') indexPublication.validate(promotedIndex);
   if (versionFromIndex(promotedIndex) !== promotion.version) throw new Error('stable index readback did not contain the promoted candidate');
 
   await publishFixtureCandidate({ store, candidate: rollbackCandidate, fixture, root });
@@ -164,11 +176,13 @@ async function runDryRun({ root, fixture = {}, now = () => new Date().toISOStrin
     now,
   });
   const rollbackIndex = await indexPublication.read();
+  if (typeof indexPublication.validate === 'function') indexPublication.validate(rollbackIndex);
   if (versionFromIndex(rollbackIndex) !== rollback.version) throw new Error('stable index readback did not contain the rollback candidate');
   if (logger && typeof logger.log === 'function') logger.log(JSON.stringify({ candidatePublish: candidateResult.status, remoteVerification: remoteStatus.status, stableVersion: promotion.version, rollbackVersion: rollback.version, npmInstallCalls }));
   return {
     upstreamLatest: detected.upstreamLatest,
     candidateVersion: candidate.version,
+    candidatePublishStatus: candidateResult.status,
     remoteStatus: remoteStatus.status,
     stableVersion: promotion.version,
     rollbackVersion: rollback.version,

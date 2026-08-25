@@ -131,7 +131,7 @@ async function writeStableIndexAtomic({ indexPath, index, historyDirectory, now 
   }
 }
 
-async function verifiedPromotion({ candidateStore, version, remoteVerifier, indexPath, historyDirectory }) {
+async function verifiedPromotion({ candidateStore, version, remoteVerifier, indexPath, historyDirectory, now }) {
   if (!candidateStore || typeof candidateStore.read !== 'function') throw new TypeError('candidateStore.read is required');
   const candidate = await candidateStore.read(version);
   if (!candidate) {
@@ -150,7 +150,7 @@ async function verifiedPromotion({ candidateStore, version, remoteVerifier, inde
     error.code = 'REMOTE_VERIFICATION_REQUIRED';
     throw error;
   }
-  await writeStableIndexAtomic({ indexPath, index, historyDirectory });
+  await writeStableIndexAtomic({ indexPath, index, historyDirectory, now });
   return { version: candidate.version, index };
 }
 
