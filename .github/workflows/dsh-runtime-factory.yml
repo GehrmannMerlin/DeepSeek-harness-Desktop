@@ -175,7 +175,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           "CURRENT_PHASE=runtime-deploy" >> $env:GITHUB_ENV
           if (Test-Path factory-runtime) { Remove-Item -Recurse -Force factory-runtime }
-          pnpm --filter @deepseek-ai/dsh deploy --prod --legacy factory-runtime
+          pnpm --filter @deepseek-ai/dsh deploy --legacy factory-runtime
           if (-not (Test-Path 'factory-runtime/package.json')) { throw 'Isolated DSH production package was not created' }
 
       - name: Smoke isolated production DSH CLI
