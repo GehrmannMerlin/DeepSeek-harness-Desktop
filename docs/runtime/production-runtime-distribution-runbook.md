@@ -31,6 +31,10 @@ If artifact materialization or ZIP creation approaches 30 minutes, stop that
 Factory run and do not dispatch another full Factory. The third run
 (`32865356755`) failed after approximately 3 hours 4 minutes with `ENOSPC`
 while `cloneMaterializedTree()` repeatedly copied cached dependency trees.
+Scheduled run `32885958573` reproduced the same failure after approximately
+3 hours 5 minutes. The subsequent scheduled run `32920257549` was cancelled
+while still in the artifact phase after the direct-archive change was pushed;
+it did not publish a candidate.
 
 Do not rerun upstream resolution, installation, or build to diagnose this
 failure. Reuse the retained isolated production tree that already passed the

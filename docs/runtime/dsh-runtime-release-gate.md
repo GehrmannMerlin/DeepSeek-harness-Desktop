@@ -18,6 +18,11 @@ All pre-artifact steps passed; artifact assembly failed at
 operations. No fourth full Factory was started, no Candidate Release was
 created, and no Pages index was deployed.
 
+Scheduled run `32885958573` reproduced the same old-code `ENOSPC` failure
+after approximately 3 hours 5 minutes. The post-change scheduled run
+`32920257549` was cancelled at approximately 17 minutes in the artifact
+phase and did not publish any remote resource.
+
 The builder now has a direct-archive path and phase timing/heartbeat output,
 covered by local tests. The exact verified rc.2 isolated tree was not retained
 by the failed ephemeral runner, so no real rc.2 artifact-only benchmark has

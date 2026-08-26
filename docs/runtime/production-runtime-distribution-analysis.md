@@ -16,6 +16,8 @@ The third real Windows Factory run was `32865356755` ([run URL](https://github.c
 
 This is a Factory performance/storage blocker. No fourth full Factory was started. The failed Windows runner was ephemeral and uploaded only `factory.log`; the verified isolated rc.2 runtime tree was not retained, so an exact-tree artifact-only benchmark cannot honestly be claimed from this checkout. The next authorized step is to run `npm run distribution:benchmark-artifact` against that same verified tree if it is retained by a future diagnostic workflow; it must finish ZIP, SHA, independent extraction, and verification before another full Factory run.
 
+An additional scheduled run `32885958573` ([run URL](https://github.com/GehrmannMerlin/DeepSeek-harness-Desktop/actions/runs/32885958573)) on the same old commit reproduced the same `ENOSPC` in `cloneMaterializedTree()` after approximately 3 hours 5 minutes. After the direct-archive change was pushed, scheduled run `32920257549` was explicitly cancelled at approximately 17 minutes while still in the artifact phase; it produced no candidate or stable publication.
+
 The artifact builder now defaults to direct ZIP entry generation from the scanned runtime tree. It preserves the existing ZIP layout contract, expands only regular file bytes, rejects links escaping the allowed runtime boundary, skips recursive back-edges, and reports millisecond timings and periodic heartbeats for pre-scan, materialization/copy, ZIP, SHA-256, independent extraction, and independent verification. Local fixture tests pass, but are implementation evidence only and are not rc.2 production evidence.
 
 ## Ten infrastructure questions
