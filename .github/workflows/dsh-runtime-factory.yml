@@ -364,9 +364,11 @@ jobs:
           "CURRENT_PHASE=factory" >> $env:GITHUB_ENV
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $url = "https://github.com/${{ github.repository }}/releases/download/dsh-runtime-v$env:RUNTIME_VERSION/dsh-runtime-$env:RUNTIME_VERSION-win32-x64.zip"
-          $resultText = node scripts/build-verified-runtime-artifact.js --source-runtime upstream/factory-runtime --frontend-dist upstream/apps/web/dist --frontend-package-json upstream/apps/web/package.json --output artifacts --version $env:RUNTIME_VERSION --platform $env:RUNTIME_PLATFORM --arch $env:RUNTIME_ARCH --artifact-url $url --source-revision $env:SOURCE_COMMIT --pnpm-version $env:PNPM_VERSION --archive-mode direct 2>&1 | Tee-Object artifacts/factory.log | Out-String
-          if ($LASTEXITCODE -ne 0) { throw 'Verified runtime Factory failed' }
-          $result = $resultText | ConvertFrom-Json
+          $resultPath = 'artifacts/factory-result.json'
+          $resultText = node scripts/build-verified-runtime-artifact.js --source-runtime upstream/factory-runtime --frontend-dist upstream/apps/web/dist --frontend-package-json upstream/apps/web/package.json --output artifacts --version $env:RUNTIME_VERSION --platform $env:RUNTIME_PLATFORM --arch $env:RUNTIME_ARCH --artifact-url $url --source-revision $env:SOURCE_COMMIT --pnpm-version $env:PNPM_VERSION --archive-mode direct 2> artifacts/factory.log | Tee-Object $resultPath | Out-String
+          $nodeExitCode = $LASTEXITCODE
+          if ($nodeExitCode -ne 0) { throw "Verified runtime Factory failed with exit code $nodeExitCode" }
+          $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
           "FACTORY_STATUS=passed" >> $env:GITHUB_ENV
           "CLI_STATUS=passed" >> $env:GITHUB_ENV
           "WEB_STATUS=passed" >> $env:GITHUB_ENV
@@ -532,5 +534,6 @@ jobs:
           name: dsh-runtime-factory-${{ env.RUNTIME_VERSION }}
           path: |
             artifacts/factory.log
+            artifacts/factory-result.json
             artifacts/factory-metadata.json
           if-no-files-found: ignore
