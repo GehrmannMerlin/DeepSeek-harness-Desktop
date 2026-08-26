@@ -427,7 +427,7 @@ jobs:
             } else { gh release upload $tag $localPath --repo $env:GITHUB_REPOSITORY }
           }
           $final = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
-          foreach ($name in @((Split-Path $zip -Leaf), $index)) {
+          foreach ($name in @((Split-Path $zip -Leaf), (Split-Path $index -Leaf))) {
             $asset = @($final.assets | Where-Object { $_.name -eq $name })
             if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded') { throw "Expected immutable asset is missing after publish: $name" }
           }
