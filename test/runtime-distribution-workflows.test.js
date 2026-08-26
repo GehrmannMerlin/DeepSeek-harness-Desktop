@@ -262,6 +262,7 @@ test('manual runtime promotion reads the exact candidate Release and verifies sh
   assert.match(text, /win32/);
   assert.match(text, /x64/);
   assert.match(text, /artifactUrl/);
+  assert.match(text, /runtime-distribution-cli\.js[\s\S]*--remote-verified/);
 });
 
 test('rollback requires the durable prior remote-verification marker before stable-index generation or Pages upload', () => {

@@ -7,12 +7,19 @@ const path = require('node:path');
 
 const { createSourceMapping } = require('./source-mapping');
 const { createFileCandidateStore } = require('./candidate-store');
-const { verifyRemoteCandidate } = require('./remote-verification');
 const { promoteStable, rollbackStable, validateStableIndex } = require('./stable-index');
 
 const PACKAGE_NAME = '@deepseek-ai/dsh';
 const DEFAULT_UPSTREAM_VERSION = '0.1.1-rc.2';
 const DEFAULT_ROLLBACK_VERSION = '0.1.0-rc.7';
+
+function loadRemoteVerifier() {
+  return require('./remote-verification').verifyRemoteCandidate;
+}
+
+function prevalidatedRemoteVerifier() {
+  return async () => ({ status: 'REMOTE_VERIFIED' });
+}
 
 function candidateIndexPath(root) {
   return path.join(root, 'runtime', 'stable', 'runtime-index.json');
@@ -133,6 +140,7 @@ async function runDryRun({ root, fixture = {}, now = () => new Date().toISOStrin
   const npmInstallCalls = fixture.npmInstaller && typeof fixture.npmInstaller.getCallCount === 'function'
     ? fixture.npmInstaller.getCallCount()
     : Number(fixture.npmInstallCalls || 0);
+  const verifyRemoteCandidate = loadRemoteVerifier();
   const remoteVerification = fixture.remoteVerification || (async ({ candidate: value }) => verifyRemoteCandidate({
     candidate: value,
     tempRoot: path.join(root, 'remote-staging'),
@@ -188,14 +196,16 @@ async function runDryRun({ root, fixture = {}, now = () => new Date().toISOStrin
   };
 }
 
-async function promote({ root, version, remoteVerification = verifyRemoteCandidate } = {}) {
+async function promote({ root, version, remoteVerification, assumeRemoteVerified = false } = {}) {
   const store = createFileCandidateStore({ root: candidateRoot(root) });
-  return promoteStable({ candidateStore: store, candidateVersion: version, remoteVerifier: remoteVerification, indexPath: candidateIndexPath(root), historyDirectory: historyDirectory(root) });
+  const verifier = remoteVerification || (assumeRemoteVerified ? prevalidatedRemoteVerifier() : loadRemoteVerifier());
+  return promoteStable({ candidateStore: store, candidateVersion: version, remoteVerifier: verifier, indexPath: candidateIndexPath(root), historyDirectory: historyDirectory(root) });
 }
 
-async function rollback({ root, version, remoteVerification = verifyRemoteCandidate } = {}) {
+async function rollback({ root, version, remoteVerification, assumeRemoteVerified = false } = {}) {
   const store = createFileCandidateStore({ root: candidateRoot(root) });
-  return rollbackStable({ candidateStore: store, targetVersion: version, remoteVerifier: remoteVerification, indexPath: candidateIndexPath(root), historyDirectory: historyDirectory(root) });
+  const verifier = remoteVerification || (assumeRemoteVerified ? prevalidatedRemoteVerifier() : loadRemoteVerifier());
+  return rollbackStable({ candidateStore: store, targetVersion: version, remoteVerifier: verifier, indexPath: candidateIndexPath(root), historyDirectory: historyDirectory(root) });
 }
 
 async function validateWorkflows({ root = process.cwd() } = {}) {
@@ -215,6 +225,7 @@ function parseArgs(argv) {
     const value = rest[index];
     if (value === '--root') options.root = rest[++index];
     else if (value === '--version') options.version = rest[++index];
+    else if (value === '--remote-verified') options.assumeRemoteVerified = true;
   }
   return { command, options };
 }
@@ -225,8 +236,8 @@ async function main(argv = process.argv.slice(2), io = {}) {
     const root = options.root || await fs.mkdtemp(path.join(os.tmpdir(), 'runtime-distribution-dry-run-'));
     return runDryRun({ root, logger: io.logger || console });
   }
-  if (command === 'promote') return promote({ root: options.root || process.cwd(), version: options.version });
-  if (command === 'rollback') return rollback({ root: options.root || process.cwd(), version: options.version });
+  if (command === 'promote') return promote({ root: options.root || process.cwd(), version: options.version, assumeRemoteVerified: options.assumeRemoteVerified });
+  if (command === 'rollback') return rollback({ root: options.root || process.cwd(), version: options.version, assumeRemoteVerified: options.assumeRemoteVerified });
   if (command === 'validate-workflows') return validateWorkflows({ root: options.root || process.cwd() });
   if (command === 'detect') {
     const root = options.root || process.cwd();

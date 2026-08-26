@@ -160,7 +160,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if ($env:REMOTE_VERIFY_STATUS -ne 'REMOTE_VERIFIED') { throw 'Stable index generation requires REMOTE_VERIFIED candidate state' }
           $command = if ($env:RUNTIME_OPERATION -eq 'rollback') { 'rollback' } else { 'promote' }
-          $result = node scripts/runtime-distribution/runtime-distribution-cli.js $command --root $env:DISTRIBUTION_ROOT --version $env:CANDIDATE_VERSION 2>&1 | Tee-Object (Join-Path $env:DISTRIBUTION_ROOT stable-index.log) | Out-String
+          $result = node scripts/runtime-distribution/runtime-distribution-cli.js $command --root $env:DISTRIBUTION_ROOT --version $env:CANDIDATE_VERSION --remote-verified 2>&1 | Tee-Object (Join-Path $env:DISTRIBUTION_ROOT stable-index.log) | Out-String
           if ($LASTEXITCODE -ne 0) { throw "Shared runtime distribution CLI failed: $result" }
           $validation = @"
           const fs = require('node:fs');
