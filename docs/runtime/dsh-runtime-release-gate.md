@@ -6,6 +6,24 @@ Branch: `codex/dsh-runtime-updater`
 
 Status: BLOCKED
 
+## Current Stage-1 production distribution blocker — 2026-08-26
+
+The Distribution implementation is integrated on `main` at
+`819ca2c076feddf478afb5411be4a2c3ff5d3bae`, but Stage 1 remains blocked. The
+third real Windows Factory run was
+`https://github.com/GehrmannMerlin/DeepSeek-harness-Desktop/actions/runs/32865356755`.
+All pre-artifact steps passed; artifact assembly failed at
+`2026-08-25T18:26:41Z` after approximately 3 hours 4 minutes with
+`ENOSPC: no space left on device` in repeated `cloneMaterializedTree()` copy
+operations. No fourth full Factory was started, no Candidate Release was
+created, and no Pages index was deployed.
+
+The builder now has a direct-archive path and phase timing/heartbeat output,
+covered by local tests. The exact verified rc.2 isolated tree was not retained
+by the failed ephemeral runner, so no real rc.2 artifact-only benchmark has
+been recorded. This is a performance blocker, not a successful Factory or
+Remote Verification result.
+
 ## Initial blocker
 
 Real DSH package installation through the historical npm path does not

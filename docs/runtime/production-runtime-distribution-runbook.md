@@ -25,6 +25,30 @@ Before a production run, confirm the worktree contains the intended workflow fil
 - `.github/workflows/dsh-runtime-factory.yml`
 - `.github/workflows/dsh-runtime-promote.yml`
 
+## Factory performance diagnosis before rerun
+
+If artifact materialization or ZIP creation approaches 30 minutes, stop that
+Factory run and do not dispatch another full Factory. The third run
+(`32865356755`) failed after approximately 3 hours 4 minutes with `ENOSPC`
+while `cloneMaterializedTree()` repeatedly copied cached dependency trees.
+
+Do not rerun upstream resolution, installation, or build to diagnose this
+failure. Reuse the retained isolated production tree that already passed the
+CLI/Web/Health/peer-closure checks and run the artifact-only benchmark:
+
+```powershell
+npm run distribution:benchmark-artifact -- --source-runtime <verified-tree> --version 0.1.1-rc.2 --source-revision b150a551b8d465e31e418e1b2eaf5e79bbb7d28e --pnpm-version 11.7.0 --heartbeat-ms 10000 --output <benchmark-output>
+```
+
+The benchmark reports `preScanMs`, `materializationMs`, `zipMs`, `sha256Ms`,
+`independentExtractionMs`, and `independentVerificationMs`, with stderr
+heartbeats for long phases. The current implementation uses direct ZIP entry
+generation, so `materializationMs=0` means the complete-tree copy was skipped;
+it does not mean verification was skipped. A rerun is permitted only after
+ZIP, SHA-256, independent extraction, CLI, Web/Health, and native smoke all
+pass on the same tree. The current checkout has no retained rc.2 tree, so its
+fixture results are not a substitute for this benchmark.
+
 ## Build a candidate in Factory
 
 Dispatch `dsh-runtime-factory.yml` from the repository's Actions UI, leaving `version` empty to resolve npm `dist-tags.latest`, or enter an exact SemVer to rebuild. The workflow:

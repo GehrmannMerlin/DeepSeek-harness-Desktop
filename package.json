@@ -12,6 +12,7 @@
     "test": "node --test \"test/*.test.js\"",
     "distribution:dry-run": "node scripts/runtime-distribution/runtime-distribution-cli.js dry-run",
     "distribution:validate-workflows": "node scripts/runtime-distribution/runtime-distribution-cli.js validate-workflows",
+    "distribution:benchmark-artifact": "node scripts/benchmark-runtime-artifact.js",
     "prepare:bundled-runtime": "node scripts/prepare-bundled-runtime.js",
     "pack": "npm run prepare:bundled-runtime && electron-builder --dir",
     "dist": "npm run prepare:bundled-runtime && electron-builder --win"

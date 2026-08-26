@@ -1,7 +1,7 @@
 # Production Runtime Distribution Architecture
 
 Date: 2026-08-25 (Asia/Shanghai)
-Status: local implementation and documentation complete; Remote Publish Gate not performed.
+Status: local implementation present; Remote Publish Gate blocked by Factory artifact materialization performance; no candidate Release or Pages deployment performed.
 
 ## End-to-end flow
 
@@ -19,6 +19,12 @@ npm dist-tags.latest
 ```
 
 The npm lookup is an upstream observation only. It selects a version to build; it never becomes a Desktop download source. The Factory must resolve and check out the exact upstream `dsh-v<VERSION>` tag and compare the checked-out commit with the resolved tag commit. No master/main fallback is allowed.
+
+### Artifact assembly performance boundary
+
+The Factory's artifact-only stage uses direct ZIP generation from the verified isolated runtime tree. It does not first materialize a second complete copy of the dependency closure. The pre-scan resolves junctions/symlinks within the allowed upstream runtime boundary, rejects unsupported special files and escaping links, skips recursive back-edges, and emits regular-file ZIP entries. The extracted ZIP remains the authoritative verification target, so CLI, Web/Health, native smoke, ZIP safety, and independent extraction checks are not removed.
+
+The third production Factory (`32865356755`) demonstrated why this boundary is required: repeated cached-tree cloning exhausted the Windows runner disk (`ENOSPC`). The direct path has passed local fixture coverage only. It must still be benchmarked against the exact retained rc.2 isolated tree before a fourth full Factory is authorized.
 
 ## Channels and state
 

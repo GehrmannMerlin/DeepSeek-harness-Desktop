@@ -10,6 +10,14 @@ The production distribution design is implementable locally, but the Remote Publ
 
 The pre-Task-9 baseline is `2e33fcb3d931e2c1dd5456889b463708bb47f789`. The implementation-time observations below were collected on 2026-08-25.
 
+## 2026-08-26 Factory performance blocker
+
+The third real Windows Factory run was `32865356755` ([run URL](https://github.com/GehrmannMerlin/DeepSeek-harness-Desktop/actions/runs/32865356755)), on desktop commit `819ca2c076feddf478afb5411be4a2c3ff5d3bae`. Its pre-artifact phases passed, including the exact rc.2 source mapping, upstream build, isolated deploy, peer closure, and isolated CLI smoke. The run failed at `Build verified Windows x64 runtime artifact` at `2026-08-25T18:26:41Z`, after approximately 3 hours 4 minutes, with `ENOSPC: no space left on device` inside repeated `cloneMaterializedTree()` `copyFile()` calls.
+
+This is a Factory performance/storage blocker. No fourth full Factory was started. The failed Windows runner was ephemeral and uploaded only `factory.log`; the verified isolated rc.2 runtime tree was not retained, so an exact-tree artifact-only benchmark cannot honestly be claimed from this checkout. The next authorized step is to run `npm run distribution:benchmark-artifact` against that same verified tree if it is retained by a future diagnostic workflow; it must finish ZIP, SHA, independent extraction, and verification before another full Factory run.
+
+The artifact builder now defaults to direct ZIP entry generation from the scanned runtime tree. It preserves the existing ZIP layout contract, expands only regular file bytes, rejects links escaping the allowed runtime boundary, skips recursive back-edges, and reports millisecond timings and periodic heartbeats for pre-scan, materialization/copy, ZIP, SHA-256, independent extraction, and independent verification. Local fixture tests pass, but are implementation evidence only and are not rc.2 production evidence.
+
 ## Ten infrastructure questions
 
 ### 1. Does a public repository/remote exist?

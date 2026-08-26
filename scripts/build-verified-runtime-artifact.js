@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 const { deflateRawSync } = require('node:zlib');
 
 const { verifyRuntime, resolveCliEntry } = require('../src/update/runtime-verifier');
@@ -61,6 +62,74 @@ async function walkFiles(root, current = '') {
     else if (entry.isFile()) files.push({ absolute, relative: relative.split(path.sep).join('/') });
     else throw new Error(`Factory output contains an unsupported link or special file: ${relative}`);
   }
+  return files;
+}
+
+function normalizeRelativePath(value) {
+  return value.split(path.sep).join('/');
+}
+
+function isWithinRoot(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function heartbeatIntervalMs() {
+  const configured = Number(process.env.DSH_FACTORY_HEARTBEAT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 10000;
+}
+
+async function measurePhase(name, timings, operation) {
+  const started = performance.now();
+  const heartbeat = setInterval(() => {
+    const elapsedMs = Math.round(performance.now() - started);
+    console.error(`[FACTORY_HEARTBEAT] phase=${name} elapsedMs=${elapsedMs}`);
+  }, heartbeatIntervalMs());
+  heartbeat.unref?.();
+  console.error(`[FACTORY_PHASE_START] phase=${name}`);
+  try {
+    return await operation();
+  } finally {
+    clearInterval(heartbeat);
+    const elapsedMs = Math.round(performance.now() - started);
+    timings[name] = elapsedMs;
+    console.error(`[FACTORY_PHASE] phase=${name} elapsedMs=${elapsedMs}`);
+  }
+}
+
+async function scanRuntimeFiles(sourceRoot) {
+  const root = await fsp.realpath(sourceRoot);
+  const boundary = await fsp.realpath(path.dirname(sourceRoot));
+  const files = [];
+
+  async function visit(candidate, relative, active) {
+    const realCandidate = await fsp.realpath(candidate);
+    if (!isWithinRoot(boundary, realCandidate)) {
+      throw new Error(`Factory source link escapes the allowed runtime boundary: ${candidate}`);
+    }
+    const stat = await fsp.lstat(candidate);
+    if (stat.isSymbolicLink()) {
+      if (active.has(realCandidate)) return;
+      return visit(realCandidate, relative, active);
+    }
+    if (active.has(realCandidate)) throw new Error(`Factory source contains a recursive link: ${candidate}`);
+    active.add(realCandidate);
+    try {
+      if (stat.isDirectory()) {
+        const entries = (await fsp.readdir(candidate, { withFileTypes: true }))
+          .filter((entry) => !(path.basename(candidate) === 'node_modules' && (entry.name === '.pnpm' || entry.name === '.pnpm-workspace-state-v1.json')))
+          .sort((left, right) => left.name.localeCompare(right.name));
+        for (const entry of entries) await visit(path.join(candidate, entry.name), path.join(relative, entry.name), active);
+        return;
+      }
+      if (!stat.isFile()) throw new Error(`Factory source contains an unsupported link or special file: ${candidate}`);
+      files.push({ absolute: realCandidate, relative: normalizeRelativePath(relative) });
+    } finally {
+      active.delete(realCandidate);
+    }
+  }
+
+  await visit(root, '', new Set());
   return files;
 }
 
@@ -123,15 +192,15 @@ async function copyTree(source, destination, active = new Set(), state = { mater
   }
 }
 
-async function createZip(sourceRoot, archivePath) {
-  const files = await walkFiles(sourceRoot);
+async function createZip(sourceRoot, archivePath, entries = null) {
+  const files = entries || await walkFiles(sourceRoot);
   const handle = await fsp.open(archivePath, 'w');
   const central = [];
   let offset = 0;
   try {
     for (const file of files) {
       const name = Buffer.from(file.relative, 'utf8');
-      const input = await fsp.readFile(file.absolute);
+      const input = file.data || await fsp.readFile(file.absolute);
       const compressed = deflateRawSync(input, { level: 9 });
       const method = compressed.length < input.length ? 8 : 0;
       const body = method === 8 ? compressed : input;
@@ -288,6 +357,43 @@ async function defaultSmoke({ rootPath, manifest }) {
   return { ok: true, web, native };
 }
 
+async function createDirectArchiveEntries({ sourceRuntimeRoot, frontendDistRoot, frontendPackageJsonPath, version, manifest }) {
+  const sourceFiles = await scanRuntimeFiles(sourceRuntimeRoot);
+  const entryMap = new Map(sourceFiles.filter((file) => file.relative !== 'runtime-manifest.json').map((file) => [file.relative, file]));
+  const byRelative = new Map(sourceFiles.map((file) => [file.relative, file]));
+  const nestedPackagePrefix = 'node_modules/@deepseek-ai/dsh/';
+  const hasNestedPackage = byRelative.has(`${nestedPackagePrefix}package.json`);
+
+  // Route B deploys expose @deepseek-ai/dsh at the runtime root. Preserve the
+  // existing artifact contract by adding the canonical nested package layout
+  // as virtual ZIP entries, without copying the complete dependency tree.
+  if (!hasNestedPackage) {
+    const virtualMappings = [
+      ['package.json', `${nestedPackagePrefix}package.json`],
+      ...sourceFiles.filter((file) => file.relative.startsWith('lib/')).map((file) => [file.relative, `${nestedPackagePrefix}${file.relative}`]),
+      ...sourceFiles.filter((file) => file.relative.startsWith('config/')).map((file) => [file.relative, `${nestedPackagePrefix}${file.relative}`]),
+    ];
+    for (const [sourceRelative, archiveRelative] of virtualMappings) {
+      const source = byRelative.get(sourceRelative);
+      if (source) entryMap.set(archiveRelative, { ...source, relative: archiveRelative });
+    }
+  }
+
+  if (frontendDistRoot) {
+    const frontendFiles = await scanRuntimeFiles(frontendDistRoot);
+    const prefix = 'node_modules/@deepseek-ai/dsh-web-frontend/dist/';
+    for (const file of frontendFiles) entryMap.set(`${prefix}${file.relative}`, { ...file, relative: `${prefix}${file.relative}` });
+    const packageData = frontendPackageJsonPath
+      ? await fsp.readFile(frontendPackageJsonPath)
+      : Buffer.from(`${JSON.stringify({ name: '@deepseek-ai/dsh-web-frontend', version, type: 'module', exports: { './dist/*': './dist/*' } }, null, 2)}\n`, 'utf8');
+    entryMap.set('node_modules/@deepseek-ai/dsh-web-frontend/package.json', { data: packageData, relative: 'node_modules/@deepseek-ai/dsh-web-frontend/package.json' });
+  }
+  entryMap.set('runtime-manifest.json', { data: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'), relative: 'runtime-manifest.json' });
+  const entries = [...entryMap.values()];
+  entries.sort((left, right) => left.relative.localeCompare(right.relative));
+  return { entries, hasNestedPackage };
+}
+
 async function buildVerifiedRuntimeArtifact({
   sourceRuntimeRoot,
   outputDirectory,
@@ -304,6 +410,7 @@ async function buildVerifiedRuntimeArtifact({
   nodeCommand = process.execPath,
   runCommand,
   smokeImpl = defaultSmoke,
+  archiveMode = 'direct',
 } = {}) {
   if (!sourceRuntimeRoot || !outputDirectory || !version || !artifactUrl) throw new TypeError('sourceRuntimeRoot, outputDirectory, version, and artifactUrl are required');
   const packageJson = await readPackage(sourceRuntimeRoot);
@@ -311,46 +418,92 @@ async function buildVerifiedRuntimeArtifact({
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-runtime-factory-'));
   const artifactRoot = path.join(tempRoot, 'runtime');
   const archivePath = path.join(outputDirectory, `dsh-runtime-${version}-${platform}-${arch}.zip`);
+  const timings = {};
   try {
-    await copyTree(sourceRuntimeRoot, artifactRoot);
-    const cliEntry = await normalizeRuntimeLayout(artifactRoot, packageJson);
-    await addFrontendDist({ rootPath: artifactRoot, frontendDistRoot, frontendPackageJsonPath, version });
     const manifest = {
       schemaVersion: 1,
       packageName: PACKAGE_NAME,
       version,
       platform,
       arch,
-      cliEntry,
+      cliEntry: 'node_modules/@deepseek-ai/dsh/lib/bin.js',
       sourceRevision,
       nodeVersion,
       pnpmVersion,
       immutable: true,
     };
     validateManifest(manifest, { packageName: PACKAGE_NAME, version, platform, arch });
-    await fsp.writeFile(path.join(artifactRoot, 'runtime-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-    await assertNoLinks(artifactRoot);
-    const verification = await verifyRuntimeImpl({ rootPath: artifactRoot, expectedVersion: version, nodeCommand, ...(runCommand ? { runCommand } : {}) });
-    if (!verification || !verification.ok) throw new Error(`Factory CLI verification failed: ${verification && verification.reason || 'unknown'}`);
-    const smoke = await smokeImpl({ rootPath: artifactRoot, manifest });
+
+    let zipEntries = null;
+    let verificationRoot = artifactRoot;
+    let smokeRoot = artifactRoot;
+    let smokeManifest = manifest;
+    if (archiveMode === 'direct') {
+      const directPlan = await measurePhase('preScanMs', timings, () => createDirectArchiveEntries({
+        sourceRuntimeRoot,
+        frontendDistRoot,
+        frontendPackageJsonPath,
+        version,
+        manifest,
+      }));
+      zipEntries = directPlan.entries;
+      timings.materializationMs = 0;
+      console.error('[FACTORY_PHASE] phase=materializationMs elapsedMs=0 mode=direct skipped=complete-tree-copy');
+      verificationRoot = sourceRuntimeRoot;
+      smokeRoot = sourceRuntimeRoot;
+      smokeManifest = directPlan.hasNestedPackage ? manifest : { ...manifest, cliEntry: 'lib/bin.js' };
+
+      // A Route B deploy has the package at its root. Its canonical nested
+      // layout is virtualized in the ZIP, so authoritative verification runs
+      // after extraction; Web/native smoke still runs against the verified
+      // source tree before archiving.
+      if (directPlan.hasNestedPackage) {
+        const verification = await verifyRuntimeImpl({ rootPath: verificationRoot, expectedVersion: version, nodeCommand, ...(runCommand ? { runCommand } : {}) });
+        if (!verification || !verification.ok) throw new Error(`Factory CLI verification failed: ${verification && verification.reason || 'unknown'}`);
+      }
+    } else if (archiveMode === 'materialized') {
+      await measurePhase('preScanMs', timings, () => scanRuntimeFiles(sourceRuntimeRoot));
+      await measurePhase('materializationMs', timings, async () => {
+        await copyTree(sourceRuntimeRoot, artifactRoot);
+        const cliEntry = await normalizeRuntimeLayout(artifactRoot, packageJson);
+        manifest.cliEntry = cliEntry;
+        await addFrontendDist({ rootPath: artifactRoot, frontendDistRoot, frontendPackageJsonPath, version });
+        await fsp.writeFile(path.join(artifactRoot, 'runtime-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+        await assertNoLinks(artifactRoot);
+      });
+    } else {
+      throw new Error(`Unsupported Factory archive mode: ${archiveMode}`);
+    }
+
+    const smoke = await smokeImpl({ rootPath: smokeRoot, manifest: smokeManifest });
     if (!smoke || smoke.ok === false || smoke.web === 'failed' || smoke.native === 'failed') throw new Error('Factory runtime smoke failed');
     await fsp.mkdir(outputDirectory, { recursive: true });
-    const zipInfo = await createZip(artifactRoot, archivePath);
-    const identity = await fileIdentity(archivePath);
+    if (archiveMode === 'direct') {
+      // The source tree has already passed link/junction safety scanning. The
+      // archive contains only regular file bytes and therefore cannot carry
+      // source links into the extracted artifact.
+      await measurePhase('zipMs', timings, () => createZip(sourceRuntimeRoot, archivePath, zipEntries));
+    } else {
+      await measurePhase('zipMs', timings, () => createZip(artifactRoot, archivePath));
+    }
+    const zipInfo = { fileCount: zipEntries ? zipEntries.length : (await walkFiles(artifactRoot)).length };
+    const identity = await measurePhase('sha256Ms', timings, () => fileIdentity(archivePath));
     const extractedRoot = path.join(tempRoot, 'archive-self-smoke');
     const { extractZip } = require('../src/update/runtime-artifact-downloader');
-    await extractZip(archivePath, extractedRoot);
-    const extractedVerification = await verifyRuntimeImpl({ rootPath: extractedRoot, expectedVersion: version, nodeCommand, ...(runCommand ? { runCommand } : {}) });
-    if (!extractedVerification || !extractedVerification.ok) throw new Error(`Factory archive self-smoke failed: ${extractedVerification && extractedVerification.reason || 'unknown'}`);
-    const extractedSmoke = await smokeImpl({ rootPath: extractedRoot, manifest });
-    if (!extractedSmoke || extractedSmoke.ok === false || extractedSmoke.web === 'failed' || extractedSmoke.native === 'failed') throw new Error('Factory archive Web/native self-smoke failed');
+    await measurePhase('independentExtractionMs', timings, () => extractZip(archivePath, extractedRoot));
+    await measurePhase('independentVerificationMs', timings, async () => {
+      const extractedVerification = await verifyRuntimeImpl({ rootPath: extractedRoot, expectedVersion: version, nodeCommand, ...(runCommand ? { runCommand } : {}) });
+      if (!extractedVerification || !extractedVerification.ok) throw new Error(`Factory archive self-smoke failed: ${extractedVerification && extractedVerification.reason || 'unknown'}`);
+      const extractedSmoke = await smokeImpl({ rootPath: extractedRoot, manifest });
+      if (!extractedSmoke || extractedSmoke.ok === false || extractedSmoke.web === 'failed' || extractedSmoke.native === 'failed') throw new Error('Factory archive Web/native self-smoke failed');
+    });
     const indexEntry = {
       packageName: PACKAGE_NAME, version, platform, arch, artifactUrl,
       sizeBytes: identity.sizeBytes, sha256: identity.sha256,
-      manifest: { schemaVersion: 1, packageName: PACKAGE_NAME, version, platform, arch, cliEntry },
+      manifest: { schemaVersion: 1, packageName: PACKAGE_NAME, version, platform, arch, cliEntry: manifest.cliEntry },
     };
     await fsp.writeFile(path.join(outputDirectory, 'runtime-index.json'), `${JSON.stringify({ schemaVersion: 1, artifacts: [indexEntry] }, null, 2)}\n`, 'utf8');
-    return { archivePath, indexEntry, fileCount: zipInfo.fileCount, rootPath: artifactRoot };
+    return { archivePath, indexEntry, fileCount: zipInfo.fileCount, rootPath: archiveMode === 'direct' ? sourceRuntimeRoot : artifactRoot, archiveMode, timings };
   } finally {
     await fsp.rm(tempRoot, { recursive: true, force: true });
   }
@@ -380,6 +533,7 @@ if (require.main === module) {
     pnpmVersion: args.pnpmversion,
     frontendDistRoot: args.frontenddist,
     frontendPackageJsonPath: args.frontendpackagejson,
+    archiveMode: args.archivemode || 'direct',
   }).then((result) => console.log(JSON.stringify(result, null, 2))).catch((error) => {
     console.error(error && error.stack ? error.stack : error);
     process.exitCode = 1;
@@ -394,5 +548,6 @@ module.exports = {
   addFrontendDist,
   fileIdentity,
   normalizeRuntimeLayout,
+  scanRuntimeFiles,
   parseArgs,
 };

@@ -33,12 +33,74 @@ test('factory creates a portable ZIP, index identity, and archive self-smoke', a
 
     assert.equal(result.indexEntry.sizeBytes > 0, true);
     assert.match(result.indexEntry.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(result.archiveMode, 'direct');
+    for (const phase of ['preScanMs', 'materializationMs', 'zipMs', 'sha256Ms', 'independentExtractionMs', 'independentVerificationMs']) {
+      assert.equal(typeof result.timings[phase], 'number', `missing timing ${phase}`);
+      assert.equal(result.timings[phase] >= 0, true, `invalid timing ${phase}`);
+    }
     const archive = await unzipper.Open.file(result.archivePath);
     const names = archive.files.map((file) => file.path);
     assert.ok(names.includes('runtime-manifest.json'));
     assert.ok(names.includes('node_modules/@deepseek-ai/dsh/package.json'));
     assert.ok(names.includes('node_modules/@deepseek-ai/dsh/lib/bin.js'));
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(output, 'runtime-index.json'), 'utf8')).artifacts, [result.indexEntry]);
+  });
+});
+
+test('factory direct archive avoids materializing the complete runtime tree', async () => {
+  await withTempDir(async (root) => {
+    const source = path.join(root, 'source-runtime');
+    await writeJson(path.join(source, 'package.json'), { name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', bin: { dsh: 'lib/bin.js' } });
+    await fs.mkdir(path.join(source, 'lib'), { recursive: true });
+    await fs.writeFile(path.join(source, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 'utf8');
+    const output = path.join(root, 'artifacts');
+    const originalCopyFile = fs.copyFile;
+    fs.copyFile = async () => {
+      throw new Error('direct archive must not materialize the runtime tree');
+    };
+    try {
+      const result = await buildVerifiedRuntimeArtifact({
+        sourceRuntimeRoot: source,
+        outputDirectory: output,
+        version: '0.1.0-rc.7',
+        artifactUrl: 'https://updates.example.test/dsh-0.1.0-rc.7-win32-x64.zip',
+        sourceRevision: '99f6f02fe',
+        pnpmVersion: '11.7.0',
+        runCommand: async () => ({ code: 0, stdout: 'dsh 0.1.0-rc.7\n', stderr: '' }),
+        smokeImpl: async () => ({ web: 'passed', native: 'passed' }),
+      });
+      assert.equal(result.fileCount >= 4, true);
+    } finally {
+      fs.copyFile = originalCopyFile;
+    }
+  });
+});
+
+test('factory direct archive rejects links outside the runtime boundary', async () => {
+  await withTempDir(async (root) => {
+    const source = path.join(root, 'source-runtime');
+    const outside = path.join(path.dirname(root), `dsh-runtime-outside-${path.basename(root)}`);
+    await fs.mkdir(source, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    await writeJson(path.join(source, 'package.json'), { name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', bin: { dsh: 'lib/bin.js' } });
+    await fs.mkdir(path.join(source, 'lib'), { recursive: true });
+    await fs.writeFile(path.join(source, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 'utf8');
+    await fs.writeFile(path.join(outside, 'secret.txt'), 'must not enter artifact\n', 'utf8');
+    await fs.symlink(outside, path.join(source, 'outside-link'), process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      await assert.rejects(
+        buildVerifiedRuntimeArtifact({
+          sourceRuntimeRoot: source,
+          outputDirectory: path.join(root, 'artifacts'),
+          version: '0.1.0-rc.7',
+          artifactUrl: 'https://updates.example.test/dsh-0.1.0-rc.7-win32-x64.zip',
+          smokeImpl: async () => ({ web: 'passed', native: 'passed' }),
+        }),
+        /escapes the allowed runtime boundary/,
+      );
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });
 
