@@ -109,3 +109,68 @@ The following are not established by local implementation:
 - a verified recovery run that points stable back to a previous candidate.
 
 Consequently, public `RELEASE READY` remains `NO`.
+
+## Stage 2 production HTTPS validation update (2026-08-26)
+
+The earlier analysis above intentionally described a pre-authorization state.
+The authorized Stage 2 run subsequently created/validated the rollback
+candidate, promoted stable, exercised an installed Desktop, rolled stable back,
+and restored stable. Historical statements remain unchanged; this section is
+the current evidence boundary.
+
+### Current remote state
+
+The final stable index is live at
+`https://gehrmannmerlin.github.io/DeepSeek-harness-Desktop/runtime/stable/runtime-index.json`
+and returned HTTP 200. Its sole win32/x64 artifact is rc.2 with 69,086,249
+bytes and SHA-256
+`5f6efe25a0704da248e7ac2a6d34b6be4a5560b2c3cdebebc5d567c5edc4d837`, pointing
+to the exact rc.2 GitHub Release asset. The candidate Release is independently
+remote-verified. The rc.7 rollback candidate is also published and retained;
+neither Release was deleted or overwritten.
+
+### Production client path
+
+The final installed executable was generated from the repaired source and
+installed into an isolated task directory. The bundled runtime manifest was
+rc.7 and the bundled CLI returned rc.7. With the production stable URL supplied
+through the explicit E2E configuration seam, the real Electron/renderer path
+recorded `UPDATE_AVAILABLE` rc.7 → rc.2, a 302→200 Release download,
+69,086,249 exact bytes and SHA in 21,182 ms, extraction, verification,
+promotion, owned Harness restart, health success, and renderer `SUCCESS`.
+
+The persisted state after the first process was managed rc.2 with no pending
+activation or failed-version suppression. A second launch started the managed
+rc.2 CLI and ended `UP_TO_DATE` without downloading. This directly closes the
+previously absent installed Desktop/restart gate.
+
+### Rollback behavior
+
+Official Promotion workflow run 32950819410 moved stable to rc.7. A managed
+rc.2 client observed stable rc.7 as older and remained on managed rc.2 without
+downgrade. A fresh OLD rc.7 client observed the same stable version and ended
+`UP_TO_DATE` without download. Official Promotion workflow run 32951216611
+then restored stable to rc.2; final HTTPS readback matched the Release asset.
+
+### Runtime transport fixes
+
+Two production compatibility issues were found by evidence rather than
+assumption: cold Pages index tail latency exceeded the old 4-second default,
+and GitHub Release assets use an ordinary 302 redirect. The source timeout is
+now 15 seconds, still bounded and post-paint. Artifact download uses native
+Node 24 fetch, a maximum of five HTTP/HTTPS redirects, `Readable.fromWeb`
+streaming, SHA-256/byte-count verification, and structured progress logs. The
+implementation does not install or resolve DSH through npm/pnpm.
+
+### Factory gate and remaining boundary
+
+`FACTORY_PERFORMANCE_ACCEPTED` is now `true` in the checked-in Factory
+workflow. Cheap detection resolved latest rc.2, found the existing
+`dsh-runtime-v0.1.1-rc.2` candidate, and selected `NO_OP`; no expensive Factory
+was started. This exact detection path was run locally because waiting for a
+cron tick would be opaque and would add no evidence after the candidate already
+existed. A real scheduled event is therefore not claimed.
+
+Final operational boundary: production runtime distribution and installed
+Desktop update are validated; public Desktop installer publication was not
+performed and Windows code signing was not configured.

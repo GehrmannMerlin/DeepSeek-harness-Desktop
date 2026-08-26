@@ -340,3 +340,93 @@ Real artifact E2E: **NOT PERFORMED — DSH_REAL_RUNTIME_ARTIFACT was not set**.
 Public **RELEASE READY: NO**. The existing blockers remain: no real remote
 candidate/Pages publication and no installed Desktop HTTPS update, restart,
 rollback, and zero-npm production E2E evidence.
+
+## Stage 2 — Production HTTPS final validation (2026-08-26)
+
+This section supersedes the earlier “not performed” rows for this Stage 2 run
+while preserving the historical gate records above.
+
+### Remote release and stable index
+
+- Stable URL: `https://gehrmannmerlin.github.io/DeepSeek-harness-Desktop/runtime/stable/runtime-index.json`
+- Final readback: HTTP 200, `@deepseek-ai/dsh@0.1.1-rc.2`, win32/x64,
+  `sizeBytes=69086249`, SHA-256
+  `5f6efe25a0704da248e7ac2a6d34b6be4a5560b2c3cdebebc5d567c5edc4d837`.
+- Candidate Release: `dsh-runtime-v0.1.1-rc.2`, published prerelease, with
+  exact ZIP and `runtime-index.json` assets; Release body contains the exact
+  upstream source tag/commit and `REMOTE_VERIFY=REMOTE_VERIFIED`.
+- OLD rollback candidate: `dsh-runtime-v0.1.0-rc.7`, built from upstream
+  `dsh-v0.1.0-rc.7` commit `99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`,
+  ZIP SHA-256
+  `7028288f0dfd8f7bf1ef8a24e019bc0ec659c08cc33ddbd3a44a046817f6b01d`.
+
+### Installed Desktop evidence
+
+The final locally installed NSIS package was built from the repaired source:
+
+- Installer: `dist/DeepSeek Harness Desktop Setup 1.0.0.exe`
+- Size: `320199558` bytes
+- SHA-256: `EBA64C21C52B32B7B31CD9A7566B6B084E8440563A957432B0DD880A88AB8DDA`
+- Isolated install: `C:\Users\韩吉衍\AppData\Local\Temp\dsh-stage2-installed-20260826`
+- Installed files: `55796`; unpacked size: `1316542290` bytes
+- Installed bundled manifest and CLI: `0.1.0-rc.7`, source revision
+  `99f6f02fe`; CLI `--version` returned `0.1.0-rc.7`.
+
+Final E2E evidence root:
+`C:\Users\韩吉衍\AppData\Local\Temp\dsh-stage2-e2e-final-proxy2-20260826`.
+The real Electron/renderer path used the production HTTPS index, GitHub
+Release redirect, streaming download, extraction, verifier, promotion,
+owned Harness stop/restart, and health check. Operation
+`update-1787734603256-1` recorded `UPDATE_AVAILABLE` rc.7 → rc.2, final HTTP
+200 after one 302, 69,086,249/69,086,249 bytes in 21,182 ms, exact SHA, and
+renderer `release_e2e_update_confirm_finished state=SUCCESS`. The new Harness
+started from `userdata/runtime/versions/0.1.1-rc.2` and passed health in 74 ms;
+the operation completed in 109,589 ms.
+
+Persisted state was `current.kind=managed`, `current.version=0.1.1-rc.2`,
+`pending=null`, and empty `failedVersions`. Restart operation
+`update-1787734841463-1` started the managed rc.2 path and ended `UP_TO_DATE`
+in 6,203 ms without another download. Normal shutdown left no task-owned
+Desktop process and no port 3080 listener.
+
+### Rollback, restore, and Factory gate
+
+- Official rollback workflow
+  [32950819410](https://github.com/GehrmannMerlin/DeepSeek-harness-Desktop/actions/runs/32950819410)
+  succeeded with remote verification and Pages deploy; stable readback was
+  rc.7.
+- Managed rc.2 against stable rc.7 made no downgrade/download and remained
+  rc.2; fresh bundled rc.7 made no download.
+- Official restore workflow
+  [32951216611](https://github.com/GehrmannMerlin/DeepSeek-harness-Desktop/actions/runs/32951216611)
+  succeeded with `REMOTE_VERIFY_STATUS=REMOTE_VERIFIED`; final stable readback
+  was exact rc.2.
+- `FACTORY_PERFORMANCE_ACCEPTED=true` is restored in the checked-in workflow.
+  Cheap detection resolved latest rc.2, found the existing candidate, chose
+  `NO_OP`, and did not start expensive Factory. A real cron tick was not
+  artificially awaited.
+
+### Root-cause fixes and final matrix
+
+The first production attempt hit the old 4,000 ms cold Pages index timeout
+(measured tail 6,097 ms); TDD changed it to a bounded 15,000 ms. The next
+attempt reached `UPDATE_AVAILABLE` but exposed the normal GitHub Release 302;
+TDD added a five-redirect limit. The final downloader uses Node 24 fetch with
+`Readable.fromWeb`, streams SHA/size verification, and logs progress; it uses
+an existing environment proxy only when present. No dependency or npm/pnpm
+client installation was added.
+
+| Gate | Result |
+| --- | --- |
+| Candidate, stable HTTPS, installed OLD rc.7 | PASS |
+| Production UPDATE_AVAILABLE → SUCCESS, SHA, extraction, verify, NEW health | PASS |
+| Restart persistence and no-op rollback matrix | PASS |
+| Official rollback/restore and remote readback | PASS |
+| npm/pnpm production installer path | PASS |
+| Factory gate restored and cheap scheduled detection | PASS |
+| Windows code signing | NOT CONFIGURED |
+| Desktop installer public publication | NOT PERFORMED |
+
+Production runtime distribution and installed Desktop update/restart/rollback/
+restore: **PASS**. Public installer publication remains **NOT PERFORMED** and
+Windows code signing remains **NOT CONFIGURED**.

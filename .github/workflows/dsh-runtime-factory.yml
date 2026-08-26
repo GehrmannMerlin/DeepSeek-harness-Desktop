@@ -22,7 +22,7 @@ env:
   RUNTIME_ARCH: x64
   NODE_VERSION: '24.18.0'
   PNPM_VERSION: '11.7.0'
-  FACTORY_PERFORMANCE_ACCEPTED: 'false'
+  FACTORY_PERFORMANCE_ACCEPTED: 'true'
 
 jobs:
   schedule-gate:

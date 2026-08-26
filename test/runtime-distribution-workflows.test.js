@@ -39,9 +39,9 @@ test('Windows runtime factory workflow has the required triggers and immutable t
   assert.match(text, /pnpm\/action-setup@[^\s]+[\s\S]*version:\s*\$\{\{\s*env\.PNPM_VERSION\s*\}\}/);
 });
 
-test('scheduled Factory runs are gated during the performance blocker while manual dispatch remains available', () => {
+test('scheduled Factory gate is restored after performance acceptance while manual dispatch remains available', () => {
   const text = workflowText();
-  assert.match(text, /FACTORY_PERFORMANCE_ACCEPTED:\s*['"]?false/);
+  assert.match(text, /FACTORY_PERFORMANCE_ACCEPTED:\s*['"]?true/);
   assert.match(text, /schedule-gate|performance-gate/i);
   assert.match(text, /github\.event_name\s*!=\s*['"]schedule['"]/);
   assert.match(text, /run_factory/);

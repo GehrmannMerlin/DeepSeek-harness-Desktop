@@ -81,3 +81,48 @@ Desktop treats the fetched index and each artifact as untrusted until schema, id
 - Rollback must target a previously remote-verified candidate and must preserve the prior stable index in history.
 - Desktop activation or health failure uses the existing runtime rollback path.
 - No workflow in this architecture claims a remote deployment until an authorized run and HTTPS readback provide evidence.
+
+## Stage 2 deployed-path evidence (2026-08-26)
+
+The deployed topology was exercised end to end:
+
+```text
+GitHub Release candidate ZIP/index
+        │ remote verify
+        ▼
+Promotion workflow ──► GitHub Pages stable index (HTTPS)
+        │                         │
+        │                         ▼
+        └──────────────► installed Electron Desktop
+                              │ fetch index / follow 302
+                              ▼
+                         stream ZIP → SHA/size
+                              │
+                              ▼
+                    safe extract → verify → promote
+                              │
+                              ▼
+                      stop/start owned Harness
+                              │
+                              ▼
+                         health + persist state
+```
+
+The final stable readback was rc.2, win32/x64, 69,086,249 bytes, with SHA-256
+`5f6efe25a0704da248e7ac2a6d34b6be4a5560b2c3cdebebc5d567c5edc4d837`. The
+installed OLD bundled runtime was rc.7. The actual Desktop operation reached
+`UPDATE_AVAILABLE`, followed the normal GitHub Release 302, streamed the exact
+artifact in 21,182 ms, verified/promoted it, restarted the owned Harness, and
+passed health. A second launch selected managed rc.2 from persisted state.
+
+The rollback topology was also exercised: official run 32950819410 published
+stable rc.7, both a managed rc.2 client and a fresh bundled rc.7 client made no
+download, and official run 32951216611 restored stable rc.2. Promotion and
+rollback never rebuild a runtime and never invoke npm/pnpm installation.
+
+The transport boundary now uses bounded Node 24 fetch for both stable index and
+artifact download. Artifact redirects are capped at five; the final response
+is streamed through `Readable.fromWeb` while counting bytes and hashing. An
+existing environment proxy is opt-in only when proxy variables are present.
+This keeps the production architecture dependency-free and leaves offline or
+unconfigured source behavior fail-closed.

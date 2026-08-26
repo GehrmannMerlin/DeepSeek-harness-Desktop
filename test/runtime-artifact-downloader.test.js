@@ -62,6 +62,37 @@ test('streams, hashes, renames, and extracts a verified artifact', async () => {
   });
 });
 
+test('follows a bounded HTTPS-compatible redirect before hashing the artifact', async () => {
+  await withTempDir(async (root) => {
+    const body = Buffer.from('redirected-runtime-zip');
+    const server = await startServer((request, response) => {
+      if (request.url === '/runtime.zip') {
+        response.writeHead(302, { location: '/asset/runtime.zip' });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-length': body.length, 'content-type': 'application/zip' });
+      response.end(body);
+    });
+    try {
+      const artifact = validArtifact(serverUrl(server), body);
+      const downloader = RuntimeArtifactDownloader({
+        extractArchive: async ({ archivePath, extractionRoot }) => {
+          assert.equal(await fs.readFile(archivePath, 'utf8'), body.toString());
+          await fs.mkdir(path.join(extractionRoot, 'runtime'), { recursive: true });
+          return path.join(extractionRoot, 'runtime');
+        },
+      });
+      const result = await downloader.prepare({ artifact, stagingRoot: root, operationId: 'op-redirect' });
+
+      assert.equal(result.artifact.version, artifact.version);
+      assert.equal(await fs.readFile(path.join(root, 'op-redirect', 'artifact.zip'), 'utf8'), body.toString());
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
 test('rejects a hash mismatch and cleans the partial artifact', async () => {
   await withTempDir(async (root) => {
     const body = Buffer.from('not-the-published-bytes');

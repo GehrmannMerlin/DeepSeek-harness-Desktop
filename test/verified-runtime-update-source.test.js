@@ -47,6 +47,21 @@ test('loads the highest verified version for the exact target', async () => {
   assert.equal(source.isConfigured(), true);
 });
 
+test('uses a production-safe default timeout for cold HTTPS index latency', async () => {
+  let observedTimeoutMs;
+  const source = VerifiedRuntimeUpdateSource({
+    indexUrl: 'https://gehrmannmerlin.github.io/DeepSeek-harness-Desktop/runtime/stable/runtime-index.json',
+    requestJson: async (_url, timeoutMs) => {
+      observedTimeoutMs = timeoutMs;
+      return indexWith([entry('0.1.1-rc.2')]);
+    },
+  });
+
+  await source.getLatest({ platform: 'win32', arch: 'x64' });
+
+  assert.equal(observedTimeoutMs, 15_000);
+});
+
 test('missing index URL is an explicit safe unavailable condition', async () => {
   const source = VerifiedRuntimeUpdateSource({ indexUrl: '' });
 

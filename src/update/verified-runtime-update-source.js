@@ -1,7 +1,5 @@
 'use strict';
 
-const http = require('node:http');
-const https = require('node:https');
 const semver = require('semver');
 
 const {
@@ -9,7 +7,9 @@ const {
   VerifiedRuntimeArtifact,
 } = require('../runtime/verified-runtime-artifact');
 
-const DEFAULT_TIMEOUT_MS = 4000;
+// A cold GitHub Pages TLS/DNS path can exceed four seconds even when the
+// stable index is healthy. This remains bounded and runs after first paint.
+const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_INDEX_URL = process.env.DSH_VERIFIED_RUNTIME_INDEX_URL || '';
 
 function sourceError(message, code, cause) {
@@ -21,36 +21,32 @@ function sourceError(message, code, cause) {
 
 function requestJsonDefault(endpoint, timeoutMs) {
   if (!endpoint) return Promise.reject(sourceError('verified runtime index URL is not configured', 'VERIFIED_RUNTIME_SOURCE_NOT_CONFIGURED'));
-  let client;
+  let parsedEndpoint;
   try {
-    client = new URL(endpoint).protocol === 'https:' ? https : http;
+    parsedEndpoint = new URL(endpoint);
   } catch (error) {
     return Promise.reject(sourceError('verified runtime index URL is invalid', 'VERIFIED_RUNTIME_SOURCE_INVALID', error));
   }
-  return new Promise((resolve, reject) => {
-    const request = client.get(endpoint, { headers: { accept: 'application/json' } }, (response) => {
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        response.resume();
-        reject(sourceError(`verified runtime index returned HTTP ${response.statusCode}`, 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE'));
-        return;
-      }
-      const chunks = [];
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => chunks.push(chunk));
-      response.on('end', () => {
-        try {
-          resolve(JSON.parse(chunks.join('')));
-        } catch (error) {
-          reject(error);
-        }
-      });
-      response.on('error', reject);
-    });
-    request.setTimeout(timeoutMs, () => request.destroy(sourceError('verified runtime index request timed out', 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE')));
-    request.on('error', (error) => reject(error.code === 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE'
-      ? error
-      : sourceError(error.message || 'verified runtime index is unreachable', 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE', error)));
-  });
+  if (parsedEndpoint.protocol !== 'http:' && parsedEndpoint.protocol !== 'https:') {
+    return Promise.reject(sourceError('verified runtime index URL is invalid', 'VERIFIED_RUNTIME_SOURCE_INVALID'));
+  }
+  if (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY) process.env.NODE_USE_ENV_PROXY ||= '1';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(parsedEndpoint, {
+    headers: { accept: 'application/json' },
+    signal: controller.signal,
+  }).then(async (response) => {
+    if (response.status < 200 || response.status >= 300) {
+      await response.body?.cancel();
+      throw sourceError(`verified runtime index returned HTTP ${response.status}`, 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE');
+    }
+    return JSON.parse(await response.text());
+  }).catch((error) => {
+    if (error && error.code === 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE') throw error;
+    if (controller.signal.aborted) throw sourceError('verified runtime index request timed out', 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE', error);
+    throw sourceError(error && error.message || 'verified runtime index is unreachable', 'VERIFIED_RUNTIME_SOURCE_UNREACHABLE', error);
+  }).finally(() => clearTimeout(timeout));
 }
 
 function VerifiedRuntimeUpdateSource({ indexUrl = DEFAULT_INDEX_URL, requestJson = requestJsonDefault, timeoutMs = DEFAULT_TIMEOUT_MS, logger } = {}) {

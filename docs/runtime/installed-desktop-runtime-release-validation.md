@@ -354,3 +354,92 @@ client-side hosting boundary are ready for feature-branch review. Public
 release remains blocked because no production Runtime Index or artifact
 hosting endpoint was configured or deployed. The task-local fixture is test
 evidence only and is not a release channel.
+
+## 25. Stage 2 real Production HTTPS validation (2026-08-26)
+
+This section records the final installed-EXE run and supersedes the earlier
+production-hosting limitation for this stage; prior sections remain historical.
+
+### Final installed package
+
+- Installer: `D:\Develop\DeepSeek Agent\DeepSeek Agent Desktop\.worktrees\dsh-factory-performance-closure\dist\DeepSeek Harness Desktop Setup 1.0.0.exe`
+- Size: `320199558` bytes
+- SHA-256: `EBA64C21C52B32B7B31CD9A7566B6B084E8440563A957432B0DD880A88AB8DDA`
+- Install root: `C:\Users\韩吉衍\AppData\Local\Temp\dsh-stage2-installed-20260826`
+- Installed manifest: bundled `@deepseek-ai/dsh@0.1.0-rc.7`, win32/x64,
+  source revision `99f6f02fe`; installed CLI returned `0.1.0-rc.7`.
+- Installer was used only as a local validation artifact. It was not publicly
+  published and no Windows signing configuration was added.
+
+### Production update
+
+Evidence root:
+`C:\Users\韩吉衍\AppData\Local\Temp\dsh-stage2-e2e-final-proxy2-20260826`.
+The final launch used real Electron, real renderer IPC, the production stable
+URL, isolated userData/DSH_HOME, and the existing normal lifecycle quit seam.
+
+Operation `update-1787734603256-1` recorded:
+
+- `UPDATE_AVAILABLE`, old bundled `0.1.0-rc.7` → verified `0.1.1-rc.2`;
+- stable HTTPS index accepted within the 15,000 ms bounded timeout;
+- normal Release redirect HTTP 302, `github.com` →
+  `release-assets.githubusercontent.com`;
+- final response HTTP 200, downloaded `69086249/69086249` bytes in `21182` ms;
+- SHA-256 exactly
+  `5f6efe25a0704da248e7ac2a6d34b6be4a5560b2c3cdebebc5d567c5edc4d837`;
+- extraction, runtime verification, promotion, old Harness stop, new Harness
+  start from `userdata/runtime/versions/0.1.1-rc.2`, and health success in 74 ms;
+- renderer IPC `release_e2e_update_confirm_finished state=SUCCESS`;
+- operation result `SUCCESS`, duration `109589` ms.
+
+Final persisted state:
+
+```json
+{
+  "current": { "relativePath": "0.1.1-rc.2", "kind": "managed", "version": "0.1.1-rc.2" },
+  "previous": null,
+  "pending": null,
+  "failedVersions": {}
+}
+```
+
+### Restart persistence
+
+The same installed EXE and userData were relaunched. The second process
+started the managed rc.2 CLI, passed health, and operation
+`update-1787734841463-1` ended `UP_TO_DATE` in 6,203 ms. No artifact download
+was logged. Normal quit left no task-owned Desktop process and no port 3080
+listener.
+
+### Rollback and restore matrix
+
+1. Official rollback run
+   [32950819410](https://github.com/GehrmannMerlin/DeepSeek-harness-Desktop/actions/runs/32950819410)
+   succeeded and stable readback became rc.7.
+2. Managed rc.2 against stable rc.7 remained managed rc.2 and ended
+   `UP_TO_DATE` without downgrade/download.
+3. Fresh OLD bundled rc.7 against stable rc.7 ended `UP_TO_DATE` without
+   download.
+4. Official restore run
+   [32951216611](https://github.com/GehrmannMerlin/DeepSeek-harness-Desktop/actions/runs/32951216611)
+   succeeded; final stable HTTP 200 readback returned exact rc.2 identity.
+
+### Production fixes discovered by the run
+
+The first real attempt exposed a cold-index tail beyond the old 4-second
+timeout; the measured 6.097-second sample justified the 15-second bounded
+default. The next attempt exposed the normal 302 Release redirect. The final
+downloader follows at most five HTTP/HTTPS redirects and streams through Node
+24 fetch/`Readable.fromWeb` while preserving size/SHA verification and progress
+logs. No npm/pnpm installer was invoked; the standalone real artifact HTTP E2E
+also passed with installer calls equal to zero.
+
+### Current decision
+
+Installed OLD → NEW Production HTTPS update, extraction, verification,
+promotion, health, restart persistence, rollback, restore, and zero-client-
+installer gate: **PASS**.
+
+Public Desktop installer publication: **NOT PERFORMED**.
+
+Windows code signing: **NOT CONFIGURED**.

@@ -176,3 +176,37 @@ perspective. Public release remains blocked because production Runtime Index
 and artifact hosting are intentionally not configured or deployed in this
 task. No GitHub Release, production publication, or external announcement was
 made.
+
+## Stage 2 Production HTTPS final gate (2026-08-26)
+
+The previous decision above describes the earlier intentionally unconfigured
+hosting boundary. Stage 2 subsequently validated the authorized production
+candidate and Pages path with an installed Desktop; that historical decision is
+preserved, while this section is the current Stage 2 result.
+
+| Gate | Result | Evidence |
+| --- | --- | --- |
+| Stable HTTPS index | PASS | HTTP 200, final rc.2 exact size/SHA/URL |
+| Candidate remote verification | PASS | rc.2 and rc.7 Release assets; `REMOTE_VERIFY=REMOTE_VERIFIED` |
+| Installed OLD bundled runtime | PASS | NSIS install, bundled manifest/CLI rc.7 |
+| Real Electron + renderer IPC update | PASS | `UPDATE_AVAILABLE` → `SUCCESS`, operation `update-1787734603256-1` |
+| Artifact redirect/download/hash | PASS | 302→200, 69,086,249 bytes, 21,182 ms, exact SHA |
+| Extraction/verifier/promotion/NEW health | PASS | managed rc.2 manifest and 74 ms restart health |
+| Restart persistence | PASS | same userData managed rc.2, `UP_TO_DATE`, no download |
+| Official rollback | PASS | workflow run 32950819410, stable rc.7 |
+| Managed/OLD rollback no-op | PASS | both clients no download or downgrade |
+| Official restore | PASS | workflow run 32951216611, stable rc.2 readback |
+| npm/pnpm production installer path | PASS | verified artifact path; local real artifact E2E installer calls 0 |
+| Factory performance gate | PASS | `FACTORY_PERFORMANCE_ACCEPTED=true`; cheap detection `NO_OP` |
+| Public Desktop installer publication | NOT PERFORMED | local installer only |
+| Windows code signing | NOT CONFIGURED | no certificate/configuration added |
+
+### Stage 2 decision
+
+Production runtime distribution and installed Desktop update/restart/rollback/
+restore: **PASS**.
+
+The public installer and code-signing boundaries remain explicitly outside this
+run: **NOT PERFORMED** and **NOT CONFIGURED**, respectively. The checked-in
+scheduled gate is restored; a real cron tick was not artificially awaited after
+the cheap no-op path was directly verified.

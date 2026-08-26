@@ -164,3 +164,73 @@ After rollback, preserve:
 - installed Desktop E2E and zero npm-call evidence.
 
 Public `RELEASE READY` remains `NO` until real production HTTPS hosting, installed Desktop E2E, restart persistence, and zero npm calls are evidenced.
+
+## Stage 2 final validation record (2026-08-26)
+
+Use this record as the completed production-path example for future releases.
+
+### Candidate and stable checks
+
+1. Verify the stable URL over HTTPS and parse `artifacts[0]`; do not assume an
+   `entries` field. Final stable was rc.2, 69,086,249 bytes, SHA-256
+   `5f6efe25a0704da248e7ac2a6d34b6be4a5560b2c3cdebebc5d567c5edc4d837`.
+2. Confirm the Release ZIP, index asset, source tag/commit, prerelease state,
+   and `REMOTE_VERIFY=REMOTE_VERIFIED` marker.
+3. Build/install the Desktop locally only. The final local NSIS SHA-256 was
+   `EBA64C21C52B32B7B31CD9A7566B6B084E8440563A957432B0DD880A88AB8DDA`;
+   public installer publication was not performed.
+
+### Installed E2E procedure and evidence
+
+Run the installed executable with isolated absolute `userData` and `DSH_HOME`,
+production stable URL, and a bounded normal-quit test seam. Confirm these log
+milestones in order:
+
+- `UPDATE_AVAILABLE` OLD bundled rc.7 → NEW rc.2;
+- one HTTP 302 redirect and final HTTP 200;
+- `runtime_artifact_download_progress` reaches
+  `downloadedBytes=69086249 totalBytes=69086249`;
+- `runtime_artifact_download_completed` contains the exact SHA;
+- `VERIFYING`, `READY_TO_APPLY`, `SWITCHING`, `RESTARTING`, and new health
+  success;
+- renderer `release_e2e_update_confirm_finished state=SUCCESS`;
+- persisted `runtime/state.json` has managed rc.2, `pending=null`, and empty
+  `failedVersions`.
+
+Launch the same installed EXE again with the same userData. It must start the
+managed rc.2 CLI and finish `UP_TO_DATE` without a second download. Inspect
+the exact process tree and port 3080 after normal quit; no task-owned process
+or listener may remain. Do not use `taskkill /IM node.exe`.
+
+### Rollback / restore procedure and evidence
+
+- Dispatch official `dsh-runtime-promote.yml` with rc.7/rollback. Successful
+  run: 32950819410.
+- Check managed rc.2: it must remain rc.2 and make no downgrade download.
+- Check a fresh OLD bundled rc.7: it must make no download.
+- Dispatch official `dsh-runtime-promote.yml` with rc.2/promote. Successful
+  run: 32951216611.
+- Re-read stable HTTPS and require exact rc.2 URL, size, and SHA.
+
+### Factory schedule gate
+
+After artifact and production client gates pass, set
+`FACTORY_PERFORMANCE_ACCEPTED=true`. The cheap scheduled-detection command
+must resolve npm latest and inspect the candidate tag before any expensive
+Factory. In this validation, latest was rc.2, the candidate existed, the
+decision was `NO_OP`, and no Factory was started. The checked-in workflow's
+manual dispatch path remains available for a deliberate exact-version run.
+
+### Transport troubleshooting captured in this run
+
+If cold Pages latency exceeds the old four-second limit, use the bounded
+15-second source timeout; do not remove the bound. GitHub Release downloads
+normally return 302, so the artifact downloader follows at most five
+HTTP/HTTPS redirects before applying byte-count and SHA verification. Node 24
+fetch is used for both index and artifact in environments where native
+`https.get` direct streaming is pathologically slow; no package installation
+or client-side npm/pnpm resolution is a valid workaround.
+
+Final boundary for this run: runtime distribution **PASS**; installed Desktop
+HTTPS update/restart/rollback/restore **PASS**; public Desktop installer
+publication **NOT PERFORMED**; Windows code signing **NOT CONFIGURED**.
