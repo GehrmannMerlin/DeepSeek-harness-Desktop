@@ -26,9 +26,9 @@
 - Modify: `test/runtime-distribution-workflows.test.js`
 - Modify: `.github/workflows/dsh-runtime-factory.yml`
 
-- [ ] Add assertions that direct mode reports `materializationMs === 0`, `fullTreeCopyCount === 0`, canonical entry progress, and disk snapshots.
-- [ ] Add workflow assertions for a temporary performance gate, a cheap schedule-only detection job, and manual-dispatch bypass.
-- [ ] Run the focused tests and record the expected RED failures before implementation.
+- [x] Add assertions that direct mode reports `materializationMs === 0`, `fullTreeCopyCount === 0`, canonical entry progress, and disk snapshots.
+- [x] Add workflow assertions for a temporary performance gate, a cheap schedule-only detection job, and manual-dispatch bypass.
+- [x] Run the focused tests and record the expected RED failures before implementation.
 
 ### Task 2: Implement bounded telemetry without changing artifact semantics
 
@@ -36,10 +36,10 @@
 - Modify: `scripts/build-verified-runtime-artifact.js`
 - Modify: `src/update/runtime-artifact-downloader.js`
 
-- [ ] Extend pre-scan, ZIP, and extraction operations with processed file/byte counters, throughput, ETA, and periodic `[FACTORY_PROGRESS]` records.
-- [ ] Record free-disk snapshots before/after runtime build, ZIP, and independent extraction when the host exposes `statfs` data.
-- [ ] Keep the direct path on the canonical entry list and count every full-tree copy attempt so the structural invariant is testable.
-- [ ] Run the focused artifact tests to GREEN.
+- [x] Extend pre-scan, ZIP, and extraction operations with processed file/byte counters, throughput, ETA, and periodic `[FACTORY_PROGRESS]` records.
+- [x] Record free-disk snapshots before/after runtime build, ZIP, and independent extraction when the host exposes `statfs` data.
+- [x] Keep the direct path on the canonical entry list and count every full-tree copy attempt so the structural invariant is testable.
+- [x] Run the focused artifact tests to GREEN.
 
 ### Task 3: Prevent scheduled runner waste and document the operating policy
 
@@ -48,9 +48,9 @@
 - Modify: `docs/runtime/production-runtime-distribution-runbook.md`
 - Modify: `docs/runtime/production-runtime-distribution-analysis.md`
 
-- [ ] Add schedule-only cheap latest/candidate detection and a checked-in performance-acceptance gate; keep `workflow_dispatch` able to run controlled benchmarks.
-- [ ] Document 2-minute inspection, 5-minute efficiency review, 10-minute anomaly stop, repeated-failure isolation, and no timeout inflation.
-- [ ] Record the confirmed old algorithmic root cause and the new direct-archive evidence boundary.
+- [x] Add schedule-only cheap latest/candidate detection and a checked-in performance-acceptance gate; keep `workflow_dispatch` able to run controlled benchmarks.
+- [x] Document 2-minute inspection, 5-minute efficiency review, 10-minute anomaly stop, repeated-failure isolation, and no timeout inflation.
+- [x] Record the confirmed old algorithmic root cause and the new direct-archive evidence boundary.
 
 ### Task 4: Build and measure one fresh real rc.2 tree
 
@@ -58,10 +58,10 @@
 - Create: external evidence directory on a disk with sufficient free space (not committed)
 - Capture: benchmark JSON/log, tree inventory, disk snapshots, and process cleanup evidence
 
-- [ ] Resolve exact npm `0.1.1-rc.2`, upstream `dsh-v0.1.1-rc.2`, Node `24.18.0`, and pnpm `11.7.0`.
-- [ ] Build/deploy the isolated runtime once, immediately record file count, bytes, link count, duration, and free disk.
-- [ ] Run `npm run distribution:benchmark-artifact -- --source-runtime <fresh-tree> ...` with a heartbeat no longer than ten seconds.
-- [ ] Apply the five-minute gate to each local phase; if direct ZIP is within budget, do not add alternate archive strategies.
+- [x] Resolve exact npm `0.1.1-rc.2`, upstream `dsh-v0.1.1-rc.2`, Node `24.18.0`, and pnpm `11.7.0`.
+- [x] Build/deploy the isolated runtime once, immediately record file count, bytes, link count, duration, and free disk.
+- [x] Run `npm run distribution:benchmark-artifact -- --source-runtime <fresh-tree> ...` with a heartbeat no longer than ten seconds.
+- [x] Apply the five-minute gate to each local phase; if direct ZIP is within budget, do not add alternate archive strategies.
 
 ### Task 5: Complete acceptance and repository verification
 
@@ -69,8 +69,16 @@
 - Modify: focused test files only if evidence requires a regression test
 - Modify: `docs/runtime/production-runtime-distribution-runbook.md`
 
-- [ ] Verify real ZIP filename, size, SHA-256, file count, manifest identity, independent extraction, extracted CLI/Web/Health/Native, and zero duplicate materialization.
-- [ ] Run focused tests, full `npm test`, `npm run distribution:validate-workflows`, and `git diff --check`; clean test-owned processes and port 3080.
-- [ ] Only after real artifact acceptance passes, run exactly one full Factory and then perform Candidate Release, HTTPS re-download, remote verification, stable promotion, and Pages index verification if authorization and remote state permit.
-- [ ] Run fresh completion verification and report every required PASS/FAIL/NOT REACHED field with timing and disk evidence.
+- [x] Verify real ZIP filename, size, SHA-256, file count, manifest identity, independent extraction, extracted CLI/Web/Health/Native, and zero duplicate materialization.
+- [x] Run focused tests, full `npm test`, `npm run distribution:validate-workflows`, and `git diff --check`; clean test-owned processes and port 3080.
+- [x] Only after real artifact acceptance passes, run exactly one full Factory and then perform Candidate Release, HTTPS re-download, remote verification, stable promotion, and Pages index verification if authorization and remote state permit.
+- [x] Run fresh completion verification and report every required PASS/FAIL/NOT REACHED field with timing and disk evidence.
 
+## Completion evidence (2026-08-26)
+
+- Fresh source: `dsh-v0.1.1-rc.2` at `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`.
+- Direct artifact: `materializationMs=0`, `fullTreeCopyCount=0`, 30,175 remote runtime files, ZIP `69086249` bytes, SHA-256 `5f6efe25a0704da248e7ac2a6d34b6be4a5560b2c3cdebebc5d567c5edc4d837`; remote artifact phase timings were pre-scan 7.383s, ZIP 20.512s, SHA-256 0.243s, independent extraction 45.271s, independent verification 3.337s.
+- Candidate Release: `dsh-runtime-v0.1.1-rc.2`, with `REMOTE_VERIFY=REMOTE_VERIFIED` and exact ZIP/index assets.
+- Promotion: successful workflow run `32929489335`; Pages was enabled in workflow mode because it was previously unconfigured, then stable index deployment succeeded.
+- Final external readback: `https://gehrmannmerlin.github.io/DeepSeek-harness-Desktop/runtime/stable/runtime-index.json` returned HTTP 200 and matched candidate identity.
+- Final local verification: `npm test` 249 passed, 1 skipped, 0 failed; workflow validation passed; `git diff --check` passed.
