@@ -74,6 +74,32 @@ test('factory direct archive reports progress, disk snapshots, and zero full-tre
   });
 });
 
+test('factory resolves a relative runtime root before smoke verification', async () => {
+  await withTempDir(async (root) => {
+    const source = path.join(root, 'source-runtime');
+    await writeJson(path.join(source, 'package.json'), { name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', bin: { dsh: 'lib/bin.js' } });
+    await fs.mkdir(path.join(source, 'lib'), { recursive: true });
+    await fs.writeFile(path.join(source, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 'utf8');
+    const previousCwd = process.cwd();
+    process.chdir(root);
+    try {
+      await buildVerifiedRuntimeArtifact({
+        sourceRuntimeRoot: 'source-runtime',
+        outputDirectory: path.join(root, 'artifacts'),
+        version: '0.1.0-rc.7',
+        artifactUrl: 'https://updates.example.test/dsh-0.1.0-rc.7-win32-x64.zip',
+        runCommand: async () => ({ code: 0, stdout: 'dsh 0.1.0-rc.7\n', stderr: '' }),
+        smokeImpl: async ({ rootPath }) => {
+          assert.ok(path.isAbsolute(rootPath));
+          return { web: 'passed', native: 'passed' };
+        },
+      });
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+});
+
 test('factory direct archive avoids materializing the complete runtime tree', async () => {
   await withTempDir(async (root) => {
     const source = path.join(root, 'source-runtime');

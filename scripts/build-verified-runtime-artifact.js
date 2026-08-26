@@ -468,6 +468,10 @@ async function buildVerifiedRuntimeArtifact({
   onProgress,
 } = {}) {
   if (!sourceRuntimeRoot || !outputDirectory || !version || !artifactUrl) throw new TypeError('sourceRuntimeRoot, outputDirectory, version, and artifactUrl are required');
+  sourceRuntimeRoot = path.resolve(sourceRuntimeRoot);
+  outputDirectory = path.resolve(outputDirectory);
+  if (frontendDistRoot) frontendDistRoot = path.resolve(frontendDistRoot);
+  if (frontendPackageJsonPath) frontendPackageJsonPath = path.resolve(frontendPackageJsonPath);
   const packageJson = await readPackage(sourceRuntimeRoot);
   if (packageJson.version !== version) throw new Error(`Factory package version mismatch: expected ${version}, received ${packageJson.version}`);
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-runtime-factory-'));
