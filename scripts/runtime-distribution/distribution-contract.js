@@ -1,6 +1,6 @@
 'use strict';
 
-const semver = require('semver');
+const semver = require('./semver-lite');
 const net = require('node:net');
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;

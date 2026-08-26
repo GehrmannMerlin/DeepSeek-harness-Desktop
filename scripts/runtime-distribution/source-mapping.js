@@ -4,7 +4,7 @@ const fs = require('node:fs/promises');
 const https = require('node:https');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
-const semver = require('semver');
+const semver = require('./semver-lite');
 
 const {
   normalizeExactVersion,

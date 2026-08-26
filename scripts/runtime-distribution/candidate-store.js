@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const semver = require('semver');
+const semver = require('./semver-lite');
 const { isDeepStrictEqual } = require('node:util');
 
 const {
