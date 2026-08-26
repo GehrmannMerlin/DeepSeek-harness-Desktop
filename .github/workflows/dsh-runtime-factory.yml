@@ -134,7 +134,7 @@ jobs:
               $zipSize = (Get-Item $remoteZip).Length
               if ($zipHash -ne $entry.sha256 -or $zipSize -ne $entry.sizeBytes) { throw 'Existing candidate ZIP identity conflicts with runtime-index.json' }
               $sourceCommitMatch = [regex]::Match($release.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
-              if ($release.body -notmatch "SOURCE_TAG=dsh-v$version" -or -not $sourceCommitMatch.Success -or $sourceCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Existing candidate source/tag identity does not match the exact upstream tag commit' }
+              if ($release.body -notmatch "SOURCE_TAG=dsh-v$version" -or -not $sourceCommitMatch.Success -or $sourceCommitMatch.Groups[1].Value -ne $sourceCommit) { throw 'Existing candidate source/tag identity does not match the exact upstream tag commit' }
               "CURRENT_PHASE=release-marker" >> $env:GITHUB_ENV
               "MARKER_STATUS=running" >> $env:GITHUB_ENV
               $marker = 'REMOTE_VERIFY=REMOTE_VERIFIED'
@@ -146,7 +146,7 @@ jobs:
               }
               $markedRelease = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
               $markedCommitMatch = [regex]::Match([string]$markedRelease.body, 'SOURCE_COMMIT=([0-9a-f]{40})')
-              if ([string]$markedRelease.body -notmatch [regex]::Escape($marker) -or [string]$markedRelease.body -notmatch "SOURCE_TAG=dsh-v$version" -or -not $markedCommitMatch.Success -or $markedCommitMatch.Groups[1].Value -ne $env:EXPECTED_SOURCE_COMMIT) { throw 'Candidate Release marker or source identity readback is invalid' }
+              if ([string]$markedRelease.body -notmatch [regex]::Escape($marker) -or [string]$markedRelease.body -notmatch "SOURCE_TAG=dsh-v$version" -or -not $markedCommitMatch.Success -or $markedCommitMatch.Groups[1].Value -ne $sourceCommit) { throw 'Candidate Release marker or source identity readback is invalid' }
               "MARKER_STATUS=passed" >> $env:GITHUB_ENV
               "REMOTE_VERIFY=REMOTE_VERIFIED" >> $env:GITHUB_ENV
               "VALIDATED_NOOP=true" >> $env:GITHUB_ENV

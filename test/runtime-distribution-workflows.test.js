@@ -109,6 +109,7 @@ test('Windows runtime factory deploys production dependencies and scopes peer cl
   assert.match(text, /fs\.statSync\(absolute\)/);
   assert.match(text, /factory-result\.json/);
   assert.match(text, /Split-Path \$index -Leaf/);
+  assert.match(text, /sourceCommitMatch\.Groups\[1\]\.Value -ne \$sourceCommit/);
   assert.match(text, /stageWorkspacePackage/);
   assert.match(text, /fs\.linkSync/);
   assert.match(text, /workspacePackages\.has\(name\)/);
