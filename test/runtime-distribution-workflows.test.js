@@ -39,6 +39,16 @@ test('Windows runtime factory workflow has the required triggers and immutable t
   assert.match(text, /pnpm\/action-setup@[^\s]+[\s\S]*version:\s*\$\{\{\s*env\.PNPM_VERSION\s*\}\}/);
 });
 
+test('scheduled Factory runs are gated during the performance blocker while manual dispatch remains available', () => {
+  const text = workflowText();
+  assert.match(text, /FACTORY_PERFORMANCE_ACCEPTED:\s*['"]?false/);
+  assert.match(text, /schedule-gate|performance-gate/i);
+  assert.match(text, /github\.event_name\s*!=\s*['"]schedule['"]/);
+  assert.match(text, /run_factory/);
+  assert.match(text, /npm view @deepseek-ai\/dsh dist-tags\.latest/);
+  assert.match(text, /gh release view[\s\S]*\$tag/);
+});
+
 test('Windows runtime factory treats an absent candidate and failure summary as valid PowerShell paths', () => {
   const text = workflowText();
   assert.match(text, /\$releaseJson = \$null[\s\S]*\$LASTEXITCODE\s*=\s*0[\s\S]*"resolve_status=passed"/);
@@ -84,6 +94,21 @@ test('Windows runtime factory deploys DSH and completes its upstream peer depend
   assert.match(text, /factory-runtime/);
   assert.match(text, /--source-runtime upstream\/factory-runtime/);
   assert.match(text, /factory-runtime\/lib\/bin\.js --version/);
+});
+
+test('Windows runtime factory deploys production dependencies and scopes peer closure to the runtime tree', () => {
+  const text = workflowText();
+  assert.match(text, /pnpm --filter @deepseek-ai\/dsh deploy --legacy --prod factory-runtime/);
+  assert.match(text, /runtimePackageFiles/);
+  assert.match(text, /walk\(runtime, runtimePackageFiles/);
+  assert.match(text, /for \(const file of runtimePackageFiles\)/);
+  assert.match(text, /optionalDependencies/);
+  assert.match(text, /for \(const field of/);
+  assert.match(text, /findDeployedPackage/);
+  assert.match(text, /node_modules.*\.pnpm/);
+  assert.match(text, /stageWorkspacePackage/);
+  assert.match(text, /fs\.linkSync/);
+  assert.match(text, /workspacePackages\.has\(name\)/);
 });
 
 test('Windows runtime factory invokes existing factory and CLI paths with immutable candidate publication', () => {

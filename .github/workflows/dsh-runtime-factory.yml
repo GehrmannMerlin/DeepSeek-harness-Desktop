@@ -22,9 +22,45 @@ env:
   RUNTIME_ARCH: x64
   NODE_VERSION: '24.18.0'
   PNPM_VERSION: '11.7.0'
+  FACTORY_PERFORMANCE_ACCEPTED: 'false'
 
 jobs:
+  schedule-gate:
+    if: github.event_name == 'schedule'
+    runs-on: windows-latest
+    outputs:
+      run_factory: ${{ steps.gate.outputs.run_factory }}
+    steps:
+      - name: Set up Node.js for cheap schedule detection
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Gate scheduled Factory while performance acceptance is open
+        id: gate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (npm view @deepseek-ai/dsh dist-tags.latest).Trim()
+          $tag = "dsh-runtime-v$version"
+          if ($env:FACTORY_PERFORMANCE_ACCEPTED -ne 'true') {
+            "run_factory=false" >> $env:GITHUB_OUTPUT
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Scheduled Factory skipped`n- Version: $version`n- Reason: FACTORY_PERFORMANCE_ACCEPTED=false; artifact-only benchmark is required first"
+            exit 0
+          }
+          $releaseJson = gh release view $tag --repo $env:GITHUB_REPOSITORY --json tagName 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            "run_factory=false" >> $env:GITHUB_OUTPUT
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Scheduled Factory no-op`n- Version: $version`n- Reason: candidate $tag already exists; expensive rebuild is not required"
+            exit 0
+          }
+          if ([string]$releaseJson -notmatch '404|Not Found') { throw "Unable to perform cheap candidate detection: $releaseJson" }
+          "run_factory=true" >> $env:GITHUB_OUTPUT
+
   factory:
+    needs: schedule-gate
+    if: always() && (github.event_name != 'schedule' || needs.schedule-gate.outputs.run_factory == 'true')
     runs-on: windows-latest
     steps:
       - name: Set up Node.js before registry resolution
@@ -175,7 +211,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           "CURRENT_PHASE=runtime-deploy" >> $env:GITHUB_ENV
           if (Test-Path factory-runtime) { Remove-Item -Recurse -Force factory-runtime }
-          pnpm --filter @deepseek-ai/dsh deploy --legacy factory-runtime
+          pnpm --filter @deepseek-ai/dsh deploy --legacy --prod factory-runtime
           if (-not (Test-Path 'factory-runtime/package.json')) { throw 'Isolated DSH production package was not created' }
 
       - name: Complete isolated DSH peer dependency closure
@@ -191,31 +227,91 @@ jobs:
           const runtime = path.join(root, 'factory-runtime');
           const workspacePackages = new Map();
           const packageFiles = [];
-          function walk(current) {
+          const runtimePackageFiles = [];
+          function walk(current, output, visited = new Set()) {
+            const realCurrent = fs.realpathSync(current);
+            if (visited.has(realCurrent)) return;
+            visited.add(realCurrent);
             for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-              if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'factory-runtime') continue;
+              if (entry.name === '.git' || (output === packageFiles && (entry.name === 'node_modules' || entry.name === 'factory-runtime'))) continue;
               const absolute = path.join(current, entry.name);
-              if (entry.isDirectory()) walk(absolute);
-              else if (entry.isFile() && entry.name === 'package.json') packageFiles.push(absolute);
+              if (entry.isDirectory() || entry.isSymbolicLink()) walk(absolute, output, visited);
+              else if (entry.isFile() && entry.name === 'package.json') output.push(absolute);
             }
           }
-          walk(root);
+          walk(root, packageFiles);
+          walk(runtime, runtimePackageFiles);
           for (const file of packageFiles) {
             const packageJson = JSON.parse(fs.readFileSync(file, 'utf8'));
             if (packageJson.name) workspacePackages.set(packageJson.name, path.dirname(file));
           }
           const peers = new Set();
-          for (const file of packageFiles) {
+          for (const file of runtimePackageFiles) {
             const packageJson = JSON.parse(fs.readFileSync(file, 'utf8'));
-            for (const name of Object.keys(packageJson.peerDependencies || {})) peers.add(name);
+            for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+              for (const name of Object.keys(packageJson[field] || {})) peers.add(name);
+            }
+          }
+          function linkRuntimeTree(source, destination) {
+            const stat = fs.lstatSync(source);
+            if (stat.isSymbolicLink()) throw new Error(`Workspace runtime file must not be a symlink: ${source}`);
+            if (stat.isDirectory()) {
+              fs.mkdirSync(destination, { recursive: true });
+              for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+                linkRuntimeTree(path.join(source, entry.name), path.join(destination, entry.name));
+              }
+              return;
+            }
+            if (!stat.isFile()) throw new Error(`Unsupported workspace runtime entry: ${source}`);
+            fs.mkdirSync(path.dirname(destination), { recursive: true });
+            fs.linkSync(source, destination);
+          }
+          function stageWorkspacePackage(source, destination) {
+            fs.mkdirSync(destination, { recursive: true });
+            linkRuntimeTree(path.join(source, 'package.json'), path.join(destination, 'package.json'));
+            for (const entry of ['lib', 'config', 'dist', 'bin']) {
+              const sourceEntry = path.join(source, entry);
+              if (fs.existsSync(sourceEntry)) linkRuntimeTree(sourceEntry, path.join(destination, entry));
+            }
+          }
+          const deployedPackages = new Map();
+          function rememberDeployedPackage(name, directory) {
+            if (!deployedPackages.has(name)) deployedPackages.set(name, directory);
+          }
+          const pnpmRoot = path.join(runtime, 'node_modules', '.pnpm');
+          if (fs.existsSync(pnpmRoot)) {
+            for (const entry of fs.readdirSync(pnpmRoot, { withFileTypes: true })) {
+              if (!entry.isDirectory()) continue;
+              const packageRoot = path.join(pnpmRoot, entry.name, 'node_modules');
+              if (!fs.existsSync(packageRoot)) continue;
+              for (const packageEntry of fs.readdirSync(packageRoot, { withFileTypes: true })) {
+                if (packageEntry.name.startsWith('@')) {
+                  const scopeRoot = path.join(packageRoot, packageEntry.name);
+                  for (const scopedEntry of fs.readdirSync(scopeRoot, { withFileTypes: true })) {
+                    if (scopedEntry.isDirectory() || scopedEntry.isSymbolicLink()) {
+                      rememberDeployedPackage(`${packageEntry.name}/${scopedEntry.name}`, path.join(scopeRoot, scopedEntry.name));
+                    }
+                  }
+                } else if (packageEntry.isDirectory() || packageEntry.isSymbolicLink()) {
+                  rememberDeployedPackage(packageEntry.name, path.join(packageRoot, packageEntry.name));
+                }
+              }
+            }
+          }
+          function findDeployedPackage(name) {
+            return deployedPackages.get(name) || null;
           }
           let linked = 0;
           for (const name of [...peers].sort()) {
-            const target = workspacePackages.get(name) || path.join(root, 'node_modules', ...name.split('/'));
             const destination = path.join(runtime, 'node_modules', ...name.split('/'));
-            if (!fs.existsSync(target) || fs.existsSync(destination)) continue;
+            if (fs.existsSync(destination)) continue;
+            const target = workspacePackages.get(name) || path.join(root, 'node_modules', ...name.split('/'));
+            const deployedTarget = findDeployedPackage(name);
+            const resolvedTarget = fs.existsSync(target) ? target : deployedTarget;
+            if (!resolvedTarget || !fs.existsSync(resolvedTarget)) continue;
             fs.mkdirSync(path.dirname(destination), { recursive: true });
-            fs.symlinkSync(target, destination, 'junction');
+            if (workspacePackages.has(name)) stageWorkspacePackage(target, destination);
+            else fs.symlinkSync(resolvedTarget, destination, 'junction');
             linked += 1;
           }
           const required = '@deepseek-ai/cordis-plugin-group';

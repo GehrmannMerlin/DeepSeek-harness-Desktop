@@ -48,11 +48,15 @@ function downloadToFile(url, destination, expectedSize, timeoutMs) {
 }
 
 async function extractZip(archivePathOrOptions, extractionRootArgument) {
-  const { archivePath, extractionRoot } = typeof archivePathOrOptions === 'object'
+  const { archivePath, extractionRoot, onProgress } = typeof archivePathOrOptions === 'object'
     ? archivePathOrOptions
     : { archivePath: archivePathOrOptions, extractionRoot: extractionRootArgument };
   const directory = await unzipper.Open.file(archivePath);
   const entries = directory.files || [];
+  const fileEntries = entries.filter((entry) => entry.type !== 'Directory' && !entry.path.endsWith('/'));
+  const totalBytes = fileEntries.reduce((sum, entry) => sum + Number(entry.vars?.uncompressedSize || 0), 0);
+  let processedFiles = 0;
+  let processedBytes = 0;
   const destinations = entries.map((entry) => {
     if (entry.type && entry.type !== 'File' && entry.type !== 'Directory') {
       throw new Error(`runtime artifact archive entry type is not allowed: ${entry.path}`);
@@ -67,6 +71,9 @@ async function extractZip(archivePathOrOptions, extractionRootArgument) {
     }
     await fsp.mkdir(path.dirname(destination), { recursive: true });
     await pipeline(entry.stream(), fs.createWriteStream(destination, { flags: 'wx' }));
+    processedFiles += 1;
+    processedBytes += Number(entry.vars?.uncompressedSize || 0);
+    onProgress?.({ processedFiles, totalFiles: fileEntries.length, processedBytes, totalBytes });
   }
   return extractionRoot;
 }

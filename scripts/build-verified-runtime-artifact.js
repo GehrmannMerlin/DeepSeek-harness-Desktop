@@ -59,7 +59,10 @@ async function walkFiles(root, current = '') {
     const relative = path.join(current, entry.name);
     const absolute = path.join(root, relative);
     if (entry.isDirectory()) files.push(...await walkFiles(root, relative));
-    else if (entry.isFile()) files.push({ absolute, relative: relative.split(path.sep).join('/') });
+    else if (entry.isFile()) {
+      const stat = await fsp.stat(absolute);
+      files.push({ absolute, relative: relative.split(path.sep).join('/'), sizeBytes: stat.size });
+    }
     else throw new Error(`Factory output contains an unsupported link or special file: ${relative}`);
   }
   return files;
@@ -97,10 +100,48 @@ async function measurePhase(name, timings, operation) {
   }
 }
 
-async function scanRuntimeFiles(sourceRoot) {
+function readFreeDiskBytes(targetPath) {
+  try {
+    if (typeof fs.statfsSync !== 'function') return null;
+    const root = path.parse(path.resolve(targetPath)).root;
+    const stats = fs.statfsSync(root);
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch (_) {
+    return null;
+  }
+}
+
+function createProgressReporter(phase, onProgress) {
+  const started = performance.now();
+  let lastLog = 0;
+  return ({ processedFiles, totalFiles = null, processedBytes, totalBytes = null, force = false }) => {
+    const elapsedMs = Math.max(1, performance.now() - started);
+    const elapsedSeconds = elapsedMs / 1000;
+    const throughputFilesPerSec = processedFiles / elapsedSeconds;
+    const throughputMBps = processedBytes / 1024 / 1024 / elapsedSeconds;
+    const remainingFiles = Number.isFinite(totalFiles) ? Math.max(0, totalFiles - processedFiles) : null;
+    const remainingBytes = Number.isFinite(totalBytes) ? Math.max(0, totalBytes - processedBytes) : null;
+    const etaMs = remainingBytes != null && throughputMBps > 0
+      ? Math.round((remainingBytes / 1024 / 1024) / throughputMBps * 1000)
+      : remainingFiles != null && throughputFilesPerSec > 0
+        ? Math.round(remainingFiles / throughputFilesPerSec * 1000)
+        : null;
+    const event = { phase, processedFiles, totalFiles, processedBytes, totalBytes, throughputFilesPerSec, throughputMBps, etaMs };
+    if (typeof onProgress === 'function') onProgress(event);
+    const now = performance.now();
+    if (force || now - lastLog >= heartbeatIntervalMs()) {
+      lastLog = now;
+      console.error(`[FACTORY_PROGRESS] phase=${phase} files=${processedFiles}/${totalFiles ?? '?'} bytes=${processedBytes}/${totalBytes ?? '?'} throughputFilesPerSec=${throughputFilesPerSec.toFixed(2)} throughputMBps=${throughputMBps.toFixed(2)} etaMs=${etaMs ?? '?'}`);
+    }
+  };
+}
+
+async function scanRuntimeFiles(sourceRoot, { onProgress } = {}) {
   const root = await fsp.realpath(sourceRoot);
   const boundary = await fsp.realpath(path.dirname(sourceRoot));
   const files = [];
+  let processedBytes = 0;
+  const report = createProgressReporter('preScanMs', onProgress);
 
   async function visit(candidate, relative, active) {
     const realCandidate = await fsp.realpath(candidate);
@@ -123,13 +164,16 @@ async function scanRuntimeFiles(sourceRoot) {
         return;
       }
       if (!stat.isFile()) throw new Error(`Factory source contains an unsupported link or special file: ${candidate}`);
-      files.push({ absolute: realCandidate, relative: normalizeRelativePath(relative) });
+      files.push({ absolute: realCandidate, relative: normalizeRelativePath(relative), sizeBytes: stat.size });
+      processedBytes += stat.size;
+      report({ processedFiles: files.length, processedBytes });
     } finally {
       active.delete(realCandidate);
     }
   }
 
   await visit(root, '', new Set());
+  report({ processedFiles: files.length, totalFiles: files.length, processedBytes, totalBytes: processedBytes, force: true });
   return files;
 }
 
@@ -154,6 +198,7 @@ async function cloneMaterializedTree(source, destination, state) {
         }
       }
       await fsp.copyFile(sourceEntry, destinationEntry);
+      state.fullTreeCopyCount = (state.fullTreeCopyCount || 0) + 1;
     } else {
       throw new Error(`Factory materialized cache contains an unsupported file: ${sourceEntry}`);
     }
@@ -187,13 +232,17 @@ async function copyTree(source, destination, active = new Set(), state = { mater
     if (!stat.isFile()) throw new Error(`Factory source contains an unsupported file: ${source}`);
     await fsp.mkdir(path.dirname(destination), { recursive: true });
     await fsp.copyFile(realSource, destination);
+    state.fullTreeCopyCount = (state.fullTreeCopyCount || 0) + 1;
   } finally {
     active.delete(realSource);
   }
 }
 
-async function createZip(sourceRoot, archivePath, entries = null) {
+async function createZip(sourceRoot, archivePath, entries = null, { onProgress } = {}) {
   const files = entries || await walkFiles(sourceRoot);
+  const totalBytes = files.reduce((sum, file) => sum + (file.sizeBytes ?? file.data?.length ?? 0), 0);
+  let processedBytes = 0;
+  const report = createProgressReporter('zipMs', onProgress);
   const handle = await fsp.open(archivePath, 'w');
   const central = [];
   let offset = 0;
@@ -218,6 +267,8 @@ async function createZip(sourceRoot, archivePath, entries = null) {
         putUInt32(offset), name,
       ]));
       offset += local.length;
+      processedBytes += input.length;
+      report({ processedFiles: central.length, totalFiles: files.length, processedBytes, totalBytes });
     }
     const centralOffset = offset;
     const centralBody = Buffer.concat(central);
@@ -226,6 +277,7 @@ async function createZip(sourceRoot, archivePath, entries = null) {
       putUInt32(0x06054b50), putUInt16(0), putUInt16(0), putUInt16(files.length), putUInt16(files.length),
       putUInt32(centralBody.length), putUInt32(centralOffset), putUInt16(0),
     ]));
+    report({ processedFiles: files.length, totalFiles: files.length, processedBytes, totalBytes, force: true });
   } finally {
     await handle.close();
   }
@@ -251,7 +303,7 @@ async function readPackage(rootPath) {
   throw new Error(`Factory output does not contain ${PACKAGE_NAME}/package.json`);
 }
 
-async function normalizeRuntimeLayout(rootPath, packageJson) {
+async function normalizeRuntimeLayout(rootPath, packageJson, state) {
   const nested = path.join(rootPath, 'node_modules', '@deepseek-ai', 'dsh', 'package.json');
   try {
     await fsp.access(nested);
@@ -260,20 +312,20 @@ async function normalizeRuntimeLayout(rootPath, packageJson) {
   const packageRoot = path.join(rootPath, 'node_modules', '@deepseek-ai', 'dsh');
   await fsp.mkdir(packageRoot, { recursive: true });
   await fsp.copyFile(path.join(rootPath, 'package.json'), path.join(packageRoot, 'package.json'));
-  await copyTree(path.join(rootPath, 'lib'), path.join(packageRoot, 'lib'));
+  await copyTree(path.join(rootPath, 'lib'), path.join(packageRoot, 'lib'), new Set(), state);
   try {
-    await copyTree(path.join(rootPath, 'config'), path.join(packageRoot, 'config'));
+    await copyTree(path.join(rootPath, 'config'), path.join(packageRoot, 'config'), new Set(), state);
   } catch (error) {
     if (error && error.code !== 'ENOENT') throw error;
   }
   return 'node_modules/@deepseek-ai/dsh/lib/bin.js';
 }
 
-async function addFrontendDist({ rootPath, frontendDistRoot, frontendPackageJsonPath, version }) {
+async function addFrontendDist({ rootPath, frontendDistRoot, frontendPackageJsonPath, version, state }) {
   if (!frontendDistRoot) return;
   const packageRoot = path.join(rootPath, 'node_modules', '@deepseek-ai', 'dsh-web-frontend');
   await fsp.mkdir(packageRoot, { recursive: true });
-  await copyTree(frontendDistRoot, path.join(packageRoot, 'dist'));
+  await copyTree(frontendDistRoot, path.join(packageRoot, 'dist'), new Set(), state);
   if (frontendPackageJsonPath) await fsp.copyFile(frontendPackageJsonPath, path.join(packageRoot, 'package.json'));
   else await fsp.writeFile(path.join(packageRoot, 'package.json'), `${JSON.stringify({ name: '@deepseek-ai/dsh-web-frontend', version, type: 'module', exports: { './dist/*': './dist/*' } }, null, 2)}\n`, 'utf8');
 }
@@ -357,8 +409,8 @@ async function defaultSmoke({ rootPath, manifest }) {
   return { ok: true, web, native };
 }
 
-async function createDirectArchiveEntries({ sourceRuntimeRoot, frontendDistRoot, frontendPackageJsonPath, version, manifest }) {
-  const sourceFiles = await scanRuntimeFiles(sourceRuntimeRoot);
+async function createDirectArchiveEntries({ sourceRuntimeRoot, frontendDistRoot, frontendPackageJsonPath, version, manifest, onProgress }) {
+  const sourceFiles = await scanRuntimeFiles(sourceRuntimeRoot, { onProgress });
   const entryMap = new Map(sourceFiles.filter((file) => file.relative !== 'runtime-manifest.json').map((file) => [file.relative, file]));
   const byRelative = new Map(sourceFiles.map((file) => [file.relative, file]));
   const nestedPackagePrefix = 'node_modules/@deepseek-ai/dsh/';
@@ -380,7 +432,7 @@ async function createDirectArchiveEntries({ sourceRuntimeRoot, frontendDistRoot,
   }
 
   if (frontendDistRoot) {
-    const frontendFiles = await scanRuntimeFiles(frontendDistRoot);
+    const frontendFiles = await scanRuntimeFiles(frontendDistRoot, { onProgress });
     const prefix = 'node_modules/@deepseek-ai/dsh-web-frontend/dist/';
     for (const file of frontendFiles) entryMap.set(`${prefix}${file.relative}`, { ...file, relative: `${prefix}${file.relative}` });
     const packageData = frontendPackageJsonPath
@@ -391,6 +443,8 @@ async function createDirectArchiveEntries({ sourceRuntimeRoot, frontendDistRoot,
   entryMap.set('runtime-manifest.json', { data: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'), relative: 'runtime-manifest.json' });
   const entries = [...entryMap.values()];
   entries.sort((left, right) => left.relative.localeCompare(right.relative));
+  const totalBytes = entries.reduce((sum, file) => sum + (file.sizeBytes ?? file.data?.length ?? 0), 0);
+  if (typeof onProgress === 'function') onProgress({ phase: 'preScanMs', processedFiles: entries.length, totalFiles: entries.length, processedBytes: totalBytes, totalBytes, throughputFilesPerSec: 0, throughputMBps: 0, etaMs: 0 });
   return { entries, hasNestedPackage };
 }
 
@@ -411,6 +465,7 @@ async function buildVerifiedRuntimeArtifact({
   runCommand,
   smokeImpl = defaultSmoke,
   archiveMode = 'direct',
+  onProgress,
 } = {}) {
   if (!sourceRuntimeRoot || !outputDirectory || !version || !artifactUrl) throw new TypeError('sourceRuntimeRoot, outputDirectory, version, and artifactUrl are required');
   const packageJson = await readPackage(sourceRuntimeRoot);
@@ -419,6 +474,15 @@ async function buildVerifiedRuntimeArtifact({
   const artifactRoot = path.join(tempRoot, 'runtime');
   const archivePath = path.join(outputDirectory, `dsh-runtime-${version}-${platform}-${arch}.zip`);
   const timings = {};
+  const diskSnapshots = [];
+  const reportProgress = typeof onProgress === 'function' ? onProgress : () => {};
+  const recordDisk = (phase, point, targetPath) => {
+    const freeBytes = readFreeDiskBytes(targetPath);
+    const snapshot = { phase, point, freeBytes };
+    diskSnapshots.push(snapshot);
+    console.error(`[FACTORY_DISK] phase=${phase} point=${point} freeBytes=${freeBytes ?? '?'}`);
+    return snapshot;
+  };
   try {
     const manifest = {
       schemaVersion: 1,
@@ -438,6 +502,7 @@ async function buildVerifiedRuntimeArtifact({
     let verificationRoot = artifactRoot;
     let smokeRoot = artifactRoot;
     let smokeManifest = manifest;
+    const materializationState = { materialized: new Map(), hardLinksEnabled: true, fullTreeCopyCount: 0 };
     if (archiveMode === 'direct') {
       const directPlan = await measurePhase('preScanMs', timings, () => createDirectArchiveEntries({
         sourceRuntimeRoot,
@@ -445,6 +510,7 @@ async function buildVerifiedRuntimeArtifact({
         frontendPackageJsonPath,
         version,
         manifest,
+        onProgress: reportProgress,
       }));
       zipEntries = directPlan.entries;
       timings.materializationMs = 0;
@@ -464,10 +530,10 @@ async function buildVerifiedRuntimeArtifact({
     } else if (archiveMode === 'materialized') {
       await measurePhase('preScanMs', timings, () => scanRuntimeFiles(sourceRuntimeRoot));
       await measurePhase('materializationMs', timings, async () => {
-        await copyTree(sourceRuntimeRoot, artifactRoot);
-        const cliEntry = await normalizeRuntimeLayout(artifactRoot, packageJson);
+        await copyTree(sourceRuntimeRoot, artifactRoot, new Set(), materializationState);
+        const cliEntry = await normalizeRuntimeLayout(artifactRoot, packageJson, materializationState);
         manifest.cliEntry = cliEntry;
-        await addFrontendDist({ rootPath: artifactRoot, frontendDistRoot, frontendPackageJsonPath, version });
+        await addFrontendDist({ rootPath: artifactRoot, frontendDistRoot, frontendPackageJsonPath, version, state: materializationState });
         await fsp.writeFile(path.join(artifactRoot, 'runtime-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
         await assertNoLinks(artifactRoot);
       });
@@ -482,7 +548,9 @@ async function buildVerifiedRuntimeArtifact({
       // The source tree has already passed link/junction safety scanning. The
       // archive contains only regular file bytes and therefore cannot carry
       // source links into the extracted artifact.
-      await measurePhase('zipMs', timings, () => createZip(sourceRuntimeRoot, archivePath, zipEntries));
+      recordDisk('zipMs', 'before', archivePath);
+      await measurePhase('zipMs', timings, () => createZip(sourceRuntimeRoot, archivePath, zipEntries, { onProgress: reportProgress }));
+      recordDisk('zipMs', 'after', archivePath);
     } else {
       await measurePhase('zipMs', timings, () => createZip(artifactRoot, archivePath));
     }
@@ -490,7 +558,13 @@ async function buildVerifiedRuntimeArtifact({
     const identity = await measurePhase('sha256Ms', timings, () => fileIdentity(archivePath));
     const extractedRoot = path.join(tempRoot, 'archive-self-smoke');
     const { extractZip } = require('../src/update/runtime-artifact-downloader');
-    await measurePhase('independentExtractionMs', timings, () => extractZip(archivePath, extractedRoot));
+    recordDisk('independentExtractionMs', 'before', extractedRoot);
+    await measurePhase('independentExtractionMs', timings, () => extractZip({
+      archivePath,
+      extractionRoot: extractedRoot,
+      onProgress: (event) => reportProgress({ phase: 'independentExtractionMs', ...event }),
+    }));
+    recordDisk('independentExtractionMs', 'after', extractedRoot);
     await measurePhase('independentVerificationMs', timings, async () => {
       const extractedVerification = await verifyRuntimeImpl({ rootPath: extractedRoot, expectedVersion: version, nodeCommand, ...(runCommand ? { runCommand } : {}) });
       if (!extractedVerification || !extractedVerification.ok) throw new Error(`Factory archive self-smoke failed: ${extractedVerification && extractedVerification.reason || 'unknown'}`);
@@ -503,7 +577,7 @@ async function buildVerifiedRuntimeArtifact({
       manifest: { schemaVersion: 1, packageName: PACKAGE_NAME, version, platform, arch, cliEntry: manifest.cliEntry },
     };
     await fsp.writeFile(path.join(outputDirectory, 'runtime-index.json'), `${JSON.stringify({ schemaVersion: 1, artifacts: [indexEntry] }, null, 2)}\n`, 'utf8');
-    return { archivePath, indexEntry, fileCount: zipInfo.fileCount, rootPath: archiveMode === 'direct' ? sourceRuntimeRoot : artifactRoot, archiveMode, timings };
+    return { archivePath, indexEntry, fileCount: zipInfo.fileCount, rootPath: archiveMode === 'direct' ? sourceRuntimeRoot : artifactRoot, archiveMode, timings, fullTreeCopyCount: materializationState.fullTreeCopyCount, diskSnapshots };
   } finally {
     await fsp.rm(tempRoot, { recursive: true, force: true });
   }

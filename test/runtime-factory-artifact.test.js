@@ -47,6 +47,33 @@ test('factory creates a portable ZIP, index identity, and archive self-smoke', a
   });
 });
 
+test('factory direct archive reports progress, disk snapshots, and zero full-tree copies', async () => {
+  await withTempDir(async (root) => {
+    const source = path.join(root, 'source-runtime');
+    await writeJson(path.join(source, 'package.json'), { name: '@deepseek-ai/dsh', version: '0.1.0-rc.7', bin: { dsh: 'lib/bin.js' } });
+    await fs.mkdir(path.join(source, 'lib'), { recursive: true });
+    await fs.writeFile(path.join(source, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 'utf8');
+    const progress = [];
+
+    const result = await buildVerifiedRuntimeArtifact({
+      sourceRuntimeRoot: source,
+      outputDirectory: path.join(root, 'artifacts'),
+      version: '0.1.0-rc.7',
+      artifactUrl: 'https://updates.example.test/dsh-0.1.0-rc.7-win32-x64.zip',
+      onProgress: (event) => progress.push(event),
+      runCommand: async () => ({ code: 0, stdout: 'dsh 0.1.0-rc.7\n', stderr: '' }),
+      smokeImpl: async () => ({ web: 'passed', native: 'passed' }),
+    });
+
+    assert.equal(result.timings.materializationMs, 0);
+    assert.equal(result.fullTreeCopyCount, 0);
+    assert.ok(Array.isArray(result.diskSnapshots));
+    assert.ok(progress.some((event) => event.phase === 'preScanMs' && event.processedFiles > 0));
+    assert.ok(progress.some((event) => event.phase === 'zipMs' && event.processedFiles === event.totalFiles));
+    assert.ok(progress.some((event) => event.phase === 'independentExtractionMs' && event.processedFiles === event.totalFiles));
+  });
+});
+
 test('factory direct archive avoids materializing the complete runtime tree', async () => {
   await withTempDir(async (root) => {
     const source = path.join(root, 'source-runtime');
