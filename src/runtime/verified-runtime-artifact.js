@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('node:path');
-const semver = require('semver');
+const semver = require('./semver-lite');
 
 const PACKAGE_NAME = '@deepseek-ai/dsh';
 const ARTIFACT_SCHEMA_VERSION = 1;

@@ -9,11 +9,9 @@ const semver = require('./semver-lite');
 const {
   normalizeExactVersion,
 } = require('./distribution-contract');
-const {
-  PACKAGE_NAME,
-  ENDPOINT: NPM_ENDPOINT,
-} = require('../../src/update/npm-registry-update-source');
 
+const PACKAGE_NAME = '@deepseek-ai/dsh';
+const NPM_ENDPOINT = 'https://registry.npmjs.org/@deepseek-ai%2fdsh';
 const SOURCE_REPOSITORY = 'https://github.com/deepseek-ai/deepseek-harness.git';
 const SOURCE_MAPPING_NOT_AVAILABLE = 'SOURCE_MAPPING_NOT_AVAILABLE';
 const SOURCE_PACKAGE_IDENTITY_MISMATCH = 'SOURCE_PACKAGE_IDENTITY_MISMATCH';

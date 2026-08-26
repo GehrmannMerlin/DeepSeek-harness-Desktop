@@ -3,7 +3,7 @@
 const { execFile } = require('node:child_process');
 const fs = require('node:fs').promises;
 const path = require('node:path');
-const semver = require('semver');
+const semver = require('../runtime/semver-lite');
 
 const PACKAGE_NAME = '@deepseek-ai/dsh';
 const CLI_TIMEOUT_MS = 10000;
