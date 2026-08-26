@@ -235,8 +235,9 @@ jobs:
             for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
               if (entry.name === '.git' || (output === packageFiles && (entry.name === 'node_modules' || entry.name === 'factory-runtime'))) continue;
               const absolute = path.join(current, entry.name);
-              if (entry.isDirectory() || entry.isSymbolicLink()) walk(absolute, output, visited);
-              else if (entry.isFile() && entry.name === 'package.json') output.push(absolute);
+              const stat = fs.statSync(absolute);
+              if (stat.isDirectory()) walk(absolute, output, visited);
+              else if (stat.isFile() && entry.name === 'package.json') output.push(absolute);
             }
           }
           walk(root, packageFiles);

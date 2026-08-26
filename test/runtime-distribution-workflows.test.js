@@ -106,6 +106,7 @@ test('Windows runtime factory deploys production dependencies and scopes peer cl
   assert.match(text, /for \(const field of/);
   assert.match(text, /findDeployedPackage/);
   assert.match(text, /node_modules.*\.pnpm/);
+  assert.match(text, /fs\.statSync\(absolute\)/);
   assert.match(text, /stageWorkspacePackage/);
   assert.match(text, /fs\.linkSync/);
   assert.match(text, /workspacePackages\.has\(name\)/);
